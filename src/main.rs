@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Commands};
 use config::AppConfig;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::info;
 
@@ -75,8 +76,8 @@ async fn main() -> Result<()> {
             let server_config = AppConfig::load_server_config(config)?;
 
             // 加载 TLS 配置
-            let tls_config =
-                tls::load_server_config(&server_config.cert_path, &server_config.key_path)?;
+            let (cert_path, key_path) = ensure_server_certs(&server_config)?;
+            let tls_config = tls::load_server_config(&cert_path, &key_path)?;
             let acceptor = TlsAcceptor::from(tls_config);
 
             // 运行服务器
@@ -170,6 +171,42 @@ fn handle_generate(opts: GenerateOptions<'_>) -> Result<()> {
     Ok(())
 }
 
+/// 确保服务器 TLS 证书与私钥可用；若未配置则在运行时生成自签名证书
+fn ensure_server_certs(config: &config::ServerConfig) -> Result<(PathBuf, PathBuf)> {
+    match (&config.cert_path, &config.key_path) {
+        (Some(cert), Some(key)) => Ok((cert.clone(), key.clone())),
+        (None, None) => {
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let temp_dir = std::env::temp_dir();
+            let cert_path = temp_dir.join(format!("tls-tunnel-cert-{}.pem", ts));
+            let key_path = temp_dir.join(format!("tls-tunnel-key-{}.pem", ts));
+
+            // 使用绑定地址作为 CN/SAN（若为 0.0.0.0 则回退 localhost）
+            let cn = if config.bind_addr == "0.0.0.0" {
+                "localhost"
+            } else {
+                config.bind_addr.as_str()
+            };
+            let alt = vec![cn.to_string()];
+
+            tls::generate_self_signed_cert(cn, &alt, &cert_path, &key_path)?;
+
+            info!(
+                "Generated self-signed server certificate at {:?} and key at {:?}",
+                cert_path, key_path
+            );
+
+            Ok((cert_path, key_path))
+        }
+        _ => anyhow::bail!(
+            "Both cert_path and key_path must be set, or leave both empty to auto-generate"
+        ),
+    }
+}
+
 /// 生成 systemd 服务文件
 fn generate_systemd_unit(
     mode: &str,
@@ -228,28 +265,35 @@ fn check_config(config_path: &str) -> Result<()> {
         println!("✓ Configuration type: Server");
         println!("✓ Bind address: {}", server_config.bind_addr);
         println!("✓ Bind port: {}", server_config.bind_port);
-        println!("✓ Certificate path: {:?}", server_config.cert_path);
-        println!("✓ Key path: {:?}", server_config.key_path);
         println!("✓ Auth key: {} characters", server_config.auth_key.len());
+        match (&server_config.cert_path, &server_config.key_path) {
+            (Some(cert), Some(key)) => {
+                println!("✓ Certificate path: {:?}", cert);
+                println!("✓ Key path: {:?}", key);
 
-        // 检查证书文件是否存在
-        if !server_config.cert_path.exists() {
-            println!(
-                "⚠ Warning: Certificate file not found: {:?}",
-                server_config.cert_path
-            );
-        } else {
-            println!("✓ Certificate file exists");
-        }
+                if !cert.exists() {
+                    println!("⚠ Warning: Certificate file not found: {:?}", cert);
+                } else {
+                    println!("✓ Certificate file exists");
+                }
 
-        // 检查密钥文件是否存在
-        if !server_config.key_path.exists() {
-            println!(
-                "⚠ Warning: Key file not found: {:?}",
-                server_config.key_path
-            );
-        } else {
-            println!("✓ Key file exists");
+                if !key.exists() {
+                    println!("⚠ Warning: Key file not found: {:?}", key);
+                } else {
+                    println!("✓ Key file exists");
+                }
+            }
+            (None, None) => {
+                println!("✓ Certificate/Key: will be auto-generated at runtime");
+            }
+            _ => {
+                println!(
+                    "✗ cert_path/key_path mismatch: set both, or leave both empty to auto-generate"
+                );
+                anyhow::bail!(
+                    "cert_path and key_path must both be set, or both omitted to auto-generate"
+                );
+            }
         }
 
         println!("\n✓ Server configuration is valid!");
@@ -308,7 +352,7 @@ fn check_config(config_path: &str) -> Result<()> {
             println!("  3. Verify field names are spelled correctly");
             println!("  4. Check that paths use forward slashes or escaped backslashes");
             println!("  5. Ensure port numbers are valid (1-65535)");
-            println!("  6. For server config: [server] section with bind_addr, bind_port, cert_path, key_path, auth_key");
+            println!("  6. For server config: [server] section with bind_addr, bind_port, auth_key, and optional cert_path/key_path (omit both to auto-generate)");
             println!("  7. For client config: [client] section with server_addr, server_port, auth_key, and [[proxies]] sections");
 
             Err(e)

@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -28,9 +28,11 @@ pub struct ServerConfig {
     /// 服务器监听端口
     pub bind_port: u16,
     /// TLS 证书路径
-    pub cert_path: PathBuf,
+    #[serde(default)]
+    pub cert_path: Option<PathBuf>,
     /// TLS 私钥路径
-    pub key_path: PathBuf,
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
     /// 认证密钥（用于客户端认证）
     pub auth_key: String,
 }
@@ -58,6 +60,16 @@ pub struct ClientFullConfig {
     /// 代理配置列表
     #[serde(default)]
     pub proxies: Vec<ProxyConfig>,
+}
+
+impl ServerConfig {
+    /// 确保证书路径配置成对出现或同时缺省
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match (&self.cert_path, &self.key_path) {
+            (Some(_), Some(_)) | (None, None) => Ok(()),
+            _ => bail!("cert_path and key_path must both be set, or both omitted to auto-generate"),
+        }
+    }
 }
 
 impl ClientFullConfig {
@@ -156,6 +168,10 @@ impl AppConfig {
         let content = std::fs::read_to_string(path)?;
         let wrapper: ServerConfigWrapper =
             toml::from_str(&content).context("Failed to parse server configuration")?;
+        wrapper
+            .server
+            .validate()
+            .context("Server configuration validation failed")?;
         Ok(wrapper.server)
     }
 
