@@ -56,13 +56,17 @@ pub async fn connect_local(
                 if attempt < max_retries {
                     tracing::warn!(
                         "Failed to connect to {} (attempt {}): {}, retrying...",
-                        local_addr, attempt, err
+                        local_addr,
+                        attempt,
+                        err
                     );
                     sleep(Duration::from_millis(retry_delay)).await;
                 } else {
                     tracing::error!(
                         "Failed to connect to {} after {} attempts: {}",
-                        local_addr, max_retries, err
+                        local_addr,
+                        max_retries,
+                        err
                     );
                     return Err(anyhow::anyhow!(
                         "Failed to connect to local service {}: {}",

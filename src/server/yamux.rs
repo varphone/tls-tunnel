@@ -3,7 +3,7 @@ use super::visitor::handle_visitor_stream;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
-use yamux::{Connection as YamuxConnection};
+use yamux::Connection as YamuxConnection;
 
 /// 运行yamux连接的poll循环
 pub async fn run_yamux_connection<T>(

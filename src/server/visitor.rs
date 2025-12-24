@@ -20,7 +20,10 @@ where
 
 /// 处理来自客户端的 visitor stream
 /// 客户端发送目标 proxy 名称，服务器通过 yamux 连接到客户端的本地服务并转发数据
-pub async fn handle_visitor_stream(stream: yamux::Stream, proxy_registry: ProxyRegistry) -> Result<()> {
+pub async fn handle_visitor_stream(
+    stream: yamux::Stream,
+    proxy_registry: ProxyRegistry,
+) -> Result<()> {
     let mut visitor_stream = stream.compat();
 
     // 读取目标 proxy 名称

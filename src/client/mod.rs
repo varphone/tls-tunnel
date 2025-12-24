@@ -1,12 +1,14 @@
 mod config;
 mod connection;
-mod visitor;
 mod stream;
+mod visitor;
 
 use crate::config::ClientFullConfig;
 use crate::connection_pool::ConnectionPool;
 use crate::transport::create_transport_client;
+use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
 use anyhow::{Context, Result};
+use futures::future::poll_fn;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,8 +16,6 @@ use tokio::time::{sleep, Duration};
 use tokio_rustls::TlsConnector;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info, warn};
-use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
-use futures::future::poll_fn;
 
 use config::{get_reconnect_delay, read_error_message};
 use connection::get_pool_config;

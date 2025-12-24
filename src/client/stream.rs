@@ -78,7 +78,8 @@ pub async fn handle_stream(
     let mut attempted_retry = false;
 
     loop {
-        let mut local_conn = super::connection::connect_local(&local_addr, &pool, proxy.proxy_type).await?;
+        let mut local_conn =
+            super::connection::connect_local(&local_addr, &pool, proxy.proxy_type).await?;
 
         let (local_read, local_write) = local_conn.stream.split();
         let mut local_read = local_read.compat();

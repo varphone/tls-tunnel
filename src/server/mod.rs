@@ -1,29 +1,29 @@
-mod registry;
 mod config;
 mod connection;
-mod yamux;
-mod visitor;
+mod registry;
 mod stats;
+mod visitor;
+mod yamux;
 
 pub use registry::ProxyRegistry;
 
 use crate::config::ServerConfig;
 use crate::stats::StatsManager;
 use crate::transport::create_transport_server;
+use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::broadcast;
 use tokio::sync::{mpsc, RwLock};
 use tokio_rustls::TlsAcceptor;
-use tokio::sync::broadcast;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info};
-use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
 
+use config::{read_client_configs, validate_proxy_configs};
 use connection::start_proxy_listener;
-use config::{validate_proxy_configs, read_client_configs};
-use yamux::run_yamux_connection;
 use stats::start_stats_server;
+use yamux::run_yamux_connection;
 
 /// 运行服务器
 pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Result<()> {

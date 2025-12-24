@@ -12,12 +12,10 @@ pub async fn start_proxy_listener(
     stream_tx: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
     tracker: ProxyStatsTracker,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(format!(
-        "{}:{}",
-        proxy.publish_addr, proxy.publish_port
-    ))
-    .await
-    .context("Failed to bind proxy listener")?;
+    let listener =
+        tokio::net::TcpListener::bind(format!("{}:{}", proxy.publish_addr, proxy.publish_port))
+            .await
+            .context("Failed to bind proxy listener")?;
 
     info!(
         "Proxy '{}' listening on {}:{}",
