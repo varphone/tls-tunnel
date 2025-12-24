@@ -1,6 +1,3 @@
-auth_key = "your-secret-auth-key-change-me"
-auth_key = "secret-key"
-auth_key = "use-a-very-strong-secret-key-here-at-least-32-chars"
 # 变更日志
 
 ## [1.0.0] - 2025-12-24
