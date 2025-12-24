@@ -7,10 +7,17 @@ use std::path::PathBuf;
 pub struct ProxyConfig {
     /// 代理名称
     pub name: String,
+    /// 服务器发布地址（绑定地址，默认 0.0.0.0）
+    #[serde(default = "default_publish_addr")]
+    pub publish_addr: String,
     /// 服务器发布端口（外部访问该端口）
     pub publish_port: u16,
     /// 客户端本地服务端口（转发到该端口）
     pub local_port: u16,
+}
+
+fn default_publish_addr() -> String {
+    "0.0.0.0".to_string()
 }
 
 /// 服务器端配置
@@ -63,8 +70,8 @@ impl ClientFullConfig {
         }
 
         let mut seen_names = HashSet::new();
+        let mut seen_bind = HashSet::new();
         let mut seen_local_ports = HashSet::new();
-        let mut seen_remote_ports = HashSet::new();
 
         for proxy in &self.proxies {
             // 检查 name 唯一性
@@ -75,16 +82,17 @@ impl ClientFullConfig {
                 );
             }
 
-            // 检查 publish_port 唯一性（服务器端发布端口）
-            if !seen_local_ports.insert(proxy.publish_port) {
+            // 检查 (publish_addr, publish_port) 唯一性（服务器端绑定地址+端口）
+            if !seen_bind.insert((proxy.publish_addr.clone(), proxy.publish_port)) {
                 anyhow::bail!(
-                    "Duplicate publish_port {}: each proxy must use a different server port",
+                    "Duplicate publish binding {}:{}: each proxy must use a different server bind address/port",
+                    proxy.publish_addr,
                     proxy.publish_port
                 );
             }
 
             // 检查 local_port 唯一性（客户端本地服务端口）
-            if !seen_remote_ports.insert(proxy.local_port) {
+            if !seen_local_ports.insert(proxy.local_port) {
                 anyhow::bail!(
                     "Duplicate local_port {}: each proxy must connect to a different local service",
                     proxy.local_port
@@ -102,6 +110,10 @@ impl ClientFullConfig {
             // 验证名称不为空
             if proxy.name.trim().is_empty() {
                 anyhow::bail!("Proxy name cannot be empty");
+            }
+
+            if proxy.publish_addr.trim().is_empty() {
+                anyhow::bail!("Proxy '{}': publish_addr cannot be empty", proxy.name);
             }
         }
 

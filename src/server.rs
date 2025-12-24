@@ -12,6 +12,7 @@ use yamux::{Config as YamuxConfig, Connection as YamuxConnection};
 #[derive(Debug, Clone)]
 struct ProxyInfo {
     name: String,
+    publish_addr: String,
     publish_port: u16,
     local_port: u16,
 }
@@ -38,7 +39,7 @@ fn validate_proxy_configs(proxies: &[ProxyInfo], server_bind_port: u16) -> Resul
     }
 
     let mut seen_names = HashSet::new();
-    let mut seen_publish_ports = HashSet::new();
+    let mut seen_bind = HashSet::new();
     let mut seen_local_ports = HashSet::new();
 
     for proxy in proxies {
@@ -50,10 +51,11 @@ fn validate_proxy_configs(proxies: &[ProxyInfo], server_bind_port: u16) -> Resul
             );
         }
 
-        // 检查 publish_port 唯一性
-        if !seen_publish_ports.insert(proxy.publish_port) {
+        // 检查 (publish_addr, publish_port) 唯一性
+        if !seen_bind.insert((proxy.publish_addr.clone(), proxy.publish_port)) {
             anyhow::bail!(
-                "Duplicate publish_port {}: each proxy must use a different server port",
+                "Duplicate publish binding {}:{}: each proxy must use a different server bind address/port",
+                proxy.publish_addr,
                 proxy.publish_port
             );
         }
@@ -75,7 +77,10 @@ fn validate_proxy_configs(proxies: &[ProxyInfo], server_bind_port: u16) -> Resul
             );
         }
 
-        // 验证端口有效性
+        // 验证地址与端口有效性
+        if proxy.publish_addr.trim().is_empty() {
+            anyhow::bail!("Proxy '{}': publish_addr cannot be empty", proxy.name);
+        }
         if proxy.publish_port == 0 {
             anyhow::bail!("Proxy '{}': publish_port cannot be 0", proxy.name);
         }
@@ -206,6 +211,15 @@ async fn handle_client(
         tls_stream.read_exact(&mut name_buf).await?;
         let name = String::from_utf8(name_buf)?;
 
+        // 读取发布地址
+        let mut publish_addr_len_buf = [0u8; 2];
+        tls_stream.read_exact(&mut publish_addr_len_buf).await?;
+        let publish_addr_len = u16::from_be_bytes(publish_addr_len_buf) as usize;
+
+        let mut publish_addr_buf = vec![0u8; publish_addr_len];
+        tls_stream.read_exact(&mut publish_addr_buf).await?;
+        let publish_addr = String::from_utf8(publish_addr_buf)?;
+
         // 读取发布端口（服务器监听端口）
         let mut publish_port_buf = [0u8; 2];
         tls_stream.read_exact(&mut publish_port_buf).await?;
@@ -216,9 +230,10 @@ async fn handle_client(
         tls_stream.read_exact(&mut local_port_buf).await?;
         let local_port = u16::from_be_bytes(local_port_buf);
 
-        info!("Proxy '{}': {}:{} -> client:{}", name, config.bind_addr, publish_port, local_port);
+        info!("Proxy '{}': {}:{} -> client:{}", name, publish_addr, publish_port, local_port);
         proxies.push(ProxyInfo {
             name,
+            publish_addr,
             publish_port,
             local_port,
         });
@@ -269,14 +284,13 @@ async fn handle_client(
 
     // 为每个代理启动监听器
     for proxy in proxies {
-        let bind_addr = config.bind_addr.clone();
         let stream_tx = stream_tx.clone();
         let peer_addr = peer_addr;
         let mut shutdown_signal = shutdown_tx.subscribe();
 
         listener_tasks.spawn(async move {
             tokio::select! {
-                result = start_proxy_listener(bind_addr, proxy.clone(), stream_tx, peer_addr) => {
+                result = start_proxy_listener(proxy.clone(), stream_tx, peer_addr) => {
                     if let Err(e) = result {
                         error!("Proxy '{}' listener error: {}", proxy.name, e);
                     }
@@ -364,18 +378,17 @@ where
 
 /// 启动代理监听器
 async fn start_proxy_listener(
-    bind_addr: String,
     proxy: ProxyInfo,
     stream_tx: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
     peer_addr: std::net::SocketAddr,
 ) -> Result<()> {
-    let listener = TcpListener::bind(format!("{}:{}", bind_addr, proxy.publish_port))
+    let listener = TcpListener::bind(format!("{}:{}", proxy.publish_addr, proxy.publish_port))
         .await
         .with_context(|| format!("Failed to bind port {}", proxy.publish_port))?;
 
     info!(
         "Proxy '{}' listening on {}:{} (forwarding to client {}:{})",
-        proxy.name, bind_addr, proxy.publish_port, peer_addr, proxy.local_port
+        proxy.name, proxy.publish_addr, proxy.publish_port, peer_addr, proxy.local_port
     );
 
     loop {

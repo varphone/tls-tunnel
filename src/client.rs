@@ -142,13 +142,22 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
         tls_stream.write_all(&name_len).await?;
         tls_stream.write_all(name_bytes).await?;
 
+        // 发送发布地址
+        let addr_bytes = proxy.publish_addr.as_bytes();
+        let addr_len = (addr_bytes.len() as u16).to_be_bytes();
+        tls_stream.write_all(&addr_len).await?;
+        tls_stream.write_all(addr_bytes).await?;
+
         // 发送发布端口（服务器监听端口）
         tls_stream.write_all(&proxy.publish_port.to_be_bytes()).await?;
 
         // 发送本地端口（客户端本地服务端口）
         tls_stream.write_all(&proxy.local_port.to_be_bytes()).await?;
 
-        info!("Sent proxy config '{}': publish={}, local={}", proxy.name, proxy.publish_port, proxy.local_port);
+        info!(
+            "Sent proxy config '{}': publish_addr={}, publish_port={}, local={}",
+            proxy.name, proxy.publish_addr, proxy.publish_port, proxy.local_port
+        );
     }
 
     tls_stream.flush().await?;
