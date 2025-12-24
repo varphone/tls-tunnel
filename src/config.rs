@@ -2,11 +2,50 @@ use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// 代理类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyType {
+    /// 原始 TCP 连接（不复用）
+    Tcp,
+    /// HTTP/1.1（支持长连接复用）
+    #[serde(rename = "http/1.1")]
+    Http11,
+    /// HTTP/2.0（单连接多路复用）
+    #[serde(rename = "http/2.0")]
+    Http2,
+}
+
+impl Default for ProxyType {
+    fn default() -> Self {
+        Self::Tcp
+    }
+}
+
+impl ProxyType {
+    /// 是否应该复用连接
+    pub fn should_reuse_connections(self) -> bool {
+        match self {
+            ProxyType::Tcp => false,
+            ProxyType::Http11 => true,
+            ProxyType::Http2 => true,
+        }
+    }
+
+    /// 是否需要单一长连接多路复用
+    pub fn is_multiplexed(self) -> bool {
+        matches!(self, ProxyType::Http2)
+    }
+}
+
 /// 代理配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
     /// 代理名称
     pub name: String,
+    /// 代理类型
+    #[serde(default)]
+    pub proxy_type: ProxyType,
     /// 服务器发布地址（绑定地址，默认 0.0.0.0）
     #[serde(default = "default_publish_addr")]
     pub publish_addr: String,

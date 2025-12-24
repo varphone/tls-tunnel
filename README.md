@@ -147,11 +147,23 @@ name = "web-service"
 publish_port = 8080
 # 客户端本地服务端口（转发到该端口）
 local_port = 3000
+# 代理类型（可选，默认为 tcp）
+# - tcp: 原始 TCP 连接，不复用连接（适用于 SSH、数据库等需要独立连接的服务）
+# - http/1.1: HTTP/1.1 长连接，支持连接复用（适用于 HTTP/1.1 Web 服务）
+# - http/2.0: HTTP/2.0，单连接多路复用（适用于 HTTP/2 服务，自动限制为单个连接）
+proxy_type = "http/1.1"
 
 [[proxies]]
 name = "api-service"
 publish_port = 8081
 local_port = 3001
+proxy_type = "http/2.0"
+
+[[proxies]]
+name = "ssh-tunnel"
+publish_port = 2222
+local_port = 22
+proxy_type = "tcp"  # SSH 需要独立连接，不复用
 ```
 
 ### 4. 运行程序
@@ -183,9 +195,53 @@ curl http://your-server.com:8080
 
 ## 高级配置
 
-### 环境变量
+### 代理类型与连接池
 
-客户端支持通过环境变量调整重连参数（所有环境变量使用 `TLS_TUNNEL_` 前缀）：
+每个代理支持三种类型，影响连接池的复用行为：
+
+#### 1. TCP 模式（`proxy_type = "tcp"`）
+- **特点**：每个请求使用独立的连接，不复用
+- **适用场景**：SSH、数据库、需要保持独立连接状态的服务
+- **连接池行为**：获取连接后不返回池中，使用完即关闭
+
+#### 2. HTTP/1.1 模式（`proxy_type = "http/1.1"`）
+- **特点**：支持 Keep-Alive 长连接，连接复用
+- **适用场景**：HTTP/1.1 Web 服务、RESTful API
+- **连接池行为**：使用后返回池中，多个请求可复用同一连接
+- **健康检查**：复用前检查连接是否仍然有效（防止复用已关闭的连接）
+
+#### 3. HTTP/2.0 模式（`proxy_type = "http/2.0"`）
+- **特点**：单连接多路复用，所有请求共享一个连接
+- **适用场景**：HTTP/2 服务
+- **连接池行为**：强制 max_size=1，保持单个持久连接
+
+### 连接池环境变量
+
+客户端支持通过环境变量调整连接池参数：
+
+```bash
+# 连接池最小空闲连接数（默认：2）
+export TLS_TUNNEL_POOL_MIN_IDLE=2
+
+# 连接池最大连接数（默认：10，HTTP/2 强制为 1）
+export TLS_TUNNEL_POOL_MAX_SIZE=10
+
+# 空闲连接最大存活时间，秒（默认：300）
+export TLS_TUNNEL_POOL_MAX_IDLE_SECS=300
+
+# 连接超时时间，毫秒（默认：5000）
+export TLS_TUNNEL_POOL_CONNECT_TIMEOUT_MS=5000
+
+# TCP Keepalive 时间，秒（可选）
+export TLS_TUNNEL_POOL_KEEPALIVE_SECS=60
+
+# TCP Keepalive 间隔，秒（可选）
+export TLS_TUNNEL_POOL_KEEPALIVE_INTERVAL_SECS=10
+```
+
+### 重连参数
+
+客户端支持通过环境变量调整重连参数：
 
 ```bash
 # 设置重连延迟（秒）
@@ -206,6 +262,7 @@ Windows (PowerShell):
 $env:TLS_TUNNEL_RECONNECT_DELAY_SECS=10
 $env:TLS_TUNNEL_LOCAL_CONNECT_RETRIES=5
 $env:TLS_TUNNEL_LOCAL_RETRY_DELAY_MS=2000
+$env:TLS_TUNNEL_POOL_MAX_SIZE=20
 .\tls-tunnel.exe client -c examples/client.toml
 ```
 

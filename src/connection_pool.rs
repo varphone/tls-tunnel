@@ -22,6 +22,8 @@ pub struct PoolConfig {
     pub keepalive_time: Option<Duration>,
     /// Keepalive 探测间隔
     pub keepalive_interval: Option<Duration>,
+    /// 是否复用连接（false 时每次创建新连接，适用于 TCP/HTTP/1.1 短连接）
+    pub reuse_connections: bool,
 }
 
 impl Default for PoolConfig {
@@ -33,6 +35,7 @@ impl Default for PoolConfig {
             connect_timeout: Duration::from_millis(5000),
             keepalive_time: Some(Duration::from_secs(30)),
             keepalive_interval: Some(Duration::from_secs(10)),
+            reuse_connections: false, // 默认不复用，避免 HTTP/1.1 问题
         }
     }
 }
@@ -132,10 +135,20 @@ impl AddressPool {
         Ok(stream)
     }
 
-    /// 归还连接到池中
-    #[allow(dead_code)]
     fn return_connection(&mut self, stream: TcpStream) {
         self.active_count = self.active_count.saturating_sub(1);
+
+        // 如果配置不允许复用，直接丢弃
+        if !self.config.reuse_connections {
+            debug!("Connection reuse disabled, discarding connection to {}", self.address);
+            return;
+        }
+
+        // 检查连接健康状态
+        if !is_connection_healthy(&stream) {
+            debug!("Connection to {} is unhealthy, discarding", self.address);
+            return;
+        }
 
         // 检查是否应该保留这个连接
         let total_idle = self.idle_connections.len();
@@ -254,6 +267,27 @@ fn apply_keepalive(stream: &TcpStream, config: &PoolConfig) {
                 .unwrap_or_else(|_| "unknown".into()),
             e
         );
+    }
+}
+
+/// 检查连接是否健康（未被远端关闭、无错误）
+fn is_connection_healthy(stream: &TcpStream) -> bool {
+    // 使用 try_read 来检查连接状态而不消耗数据
+    let mut buf = [0u8; 1];
+    match stream.try_read(&mut buf) {
+        Ok(0) => false, // EOF，连接已关闭
+        Ok(_) => {
+            // 不应该有数据，因为这是空闲连接
+            // 但如果有数据，连接仍然是活的
+            warn!("Unexpected data in idle connection");
+            true
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true, // 无数据，连接正常
+        Err(e) => {
+            // 其他错误，连接不健康
+            debug!("Connection health check failed: {}", e);
+            false
+        }
     }
 }
 

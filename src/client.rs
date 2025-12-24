@@ -1,8 +1,9 @@
-use crate::config::ClientFullConfig;
+use crate::config::{ClientFullConfig, ProxyType};
 use crate::connection_pool::{ConnectionPool, PoolConfig};
 use anyhow::{Context, Result};
 use rustls::pki_types::ServerName;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -203,28 +204,44 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
             .and_then(|v| v.parse().ok())
             .map(Duration::from_secs)
             .or(defaults.keepalive_interval),
+        reuse_connections: true, // 默认值，会在下面根据代理类型调整
     };
 
-    let connection_pool = Arc::new(ConnectionPool::new(pool_config));
-
-    // 预热连接池
-    let addresses: Vec<String> = config
+    // 为每个代理创建独立的连接池配置
+    let proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>> = Arc::new(config
         .proxies
         .iter()
-        .map(|p| format!("127.0.0.1:{}", p.local_port))
-        .collect();
+        .map(|proxy| {
+            let mut pool_cfg = pool_config.clone();
+            pool_cfg.reuse_connections = proxy.proxy_type.should_reuse_connections();
+            
+            // HTTP/2.0 需要单连接多路复用，调整池大小
+            if proxy.proxy_type.is_multiplexed() {
+                pool_cfg.max_size = 1;
+                pool_cfg.min_idle = 1;
+            }
+            
+            let pool = Arc::new(ConnectionPool::new(pool_cfg));
+            (proxy.local_port, pool)
+        })
+        .collect());
 
-    info!(
-        "Warming up connection pools for {} proxies...",
-        addresses.len()
-    );
-    if let Err(e) = connection_pool.warmup_all(&addresses).await {
-        warn!("Failed to warm up connection pools: {}", e);
+    // 预热连接池
+    info!("Warming up connection pools for {} proxies...", config.proxies.len());
+    for proxy in &config.proxies {
+        let local_addr = format!("127.0.0.1:{}", proxy.local_port);
+        if let Some(pool) = proxy_pools.get(&proxy.local_port) {
+            if let Err(e) = pool.warmup(&local_addr).await {
+                warn!("Failed to warm up pool for proxy '{}': {}", proxy.name, e);
+            }
+        }
     }
 
     // 启动后台清理任务
-    let pool_for_cleanup = connection_pool.clone();
-    pool_for_cleanup.start_cleanup_task(Duration::from_secs(30));
+    for pool in proxy_pools.values() {
+        let pool_clone = pool.clone();
+        pool_clone.start_cleanup_task(Duration::from_secs(30));
+    }
 
     // 建立 yamux 连接（使用兼容层）
     let yamux_config = YamuxConfig::default();
@@ -243,10 +260,10 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
                 info!("Received new stream from server");
 
                 let config = config.clone();
-                let pool = connection_pool.clone();
+                let proxy_pools = proxy_pools.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_stream(stream, config, pool).await {
+                    if let Err(e) = handle_stream(stream, config, proxy_pools).await {
                         error!("Stream handling error: {}", e);
                     }
                 });
@@ -293,7 +310,7 @@ async fn send_proxies_json(
 async fn handle_stream(
     mut stream: yamux::Stream,
     config: ClientFullConfig,
-    pool: Arc<ConnectionPool>,
+    proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>>,
 ) -> Result<()> {
     use futures::io::AsyncReadExt as FuturesAsyncReadExt;
 
@@ -312,6 +329,11 @@ async fn handle_stream(
         .ok_or_else(|| anyhow::anyhow!("No proxy config found for port {}", target_port))?;
 
     info!("Found proxy '{}' for port {}", proxy.name, target_port);
+    
+    // 获取该端口对应的连接池
+    let pool = proxy_pools.get(&target_port)
+        .ok_or_else(|| anyhow::anyhow!("No connection pool found for port {}", target_port))?
+        .clone();
 
     let local_addr = format!("127.0.0.1:{}", target_port);
     let (mut stream_read, mut stream_write) = futures::io::AsyncReadExt::split(stream);
@@ -320,7 +342,7 @@ async fn handle_stream(
     let mut attempted_retry = false;
 
     loop {
-        let mut local_conn = connect_local(&local_addr, &pool).await?;
+        let mut local_conn = connect_local(&local_addr, &pool, proxy.proxy_type).await?;
 
         let (local_read, local_write) = local_conn.stream.split();
         let mut local_read = local_read.compat();
@@ -338,16 +360,17 @@ async fn handle_stream(
         match result {
             Ok(_) => {
                 info!("Stream closed for proxy '{}'", proxy.name);
-                if local_conn.pooled {
-                    // Avoid reusing connections for now; discard to prevent stale HTTP/1.1 keepalive issues.
-                    pool.discard_connection(&local_addr, local_conn.stream)
-                        .await;
+                if local_conn.pooled && proxy.proxy_type.should_reuse_connections() {
+                    // 根据代理类型决定是否复用连接
+                    pool.return_connection(&local_addr, local_conn.stream).await;
+                } else {
+                    pool.discard_connection(&local_addr, local_conn.stream).await;
                 }
                 return Ok(());
             }
             Err(e) => {
                 if local_conn.pooled {
-                    // Do not reuse faulty pooled connection; discard and decrement count.
+                    // 出错的连接不复用，直接丢弃
                     pool.discard_connection(&local_addr, local_conn.stream)
                         .await;
                 }
@@ -369,59 +392,67 @@ struct LocalConn {
     pooled: bool,
 }
 
-async fn connect_local(local_addr: &str, pool: &Arc<ConnectionPool>) -> Result<LocalConn> {
-    match pool.get(local_addr).await {
-        Ok(stream) => {
-            info!("Got connection to {} from pool", local_addr);
-            Ok(LocalConn {
-                stream,
-                pooled: true,
-            })
-        }
-        Err(e) => {
-            warn!(
-                "Failed to get connection from pool: {}, falling back to direct connection",
-                e
-            );
-
-            let max_retries = get_local_retries();
-            let retry_delay = get_local_retry_delay();
-
-            for attempt in 1..=max_retries {
-                match TcpStream::connect(local_addr).await {
-                    Ok(stream) => {
-                        info!(
-                            "Connected to local service: {} (attempt {})",
-                            local_addr, attempt
-                        );
-                        return Ok(LocalConn {
-                            stream,
-                            pooled: false,
-                        });
-                    }
-                    Err(err) => {
-                        if attempt < max_retries {
-                            warn!(
-                                "Failed to connect to {} (attempt {}): {}, retrying...",
-                                local_addr, attempt, err
-                            );
-                            sleep(Duration::from_millis(retry_delay)).await;
-                        } else {
-                            error!(
-                                "Failed to connect to {} after {} attempts: {}",
-                                local_addr, max_retries, err
-                            );
-                            return Err(anyhow::anyhow!(
-                                "Failed to connect to local service {}: {}",
-                                local_addr,
-                                err
-                            ));
-                        }
-                    }
-                }
+async fn connect_local(
+    local_addr: &str, 
+    pool: &Arc<ConnectionPool>,
+    proxy_type: ProxyType,
+) -> Result<LocalConn> {
+    // 如果该代理类型应该复用连接，则尝试从池中获取
+    if proxy_type.should_reuse_connections() {
+        match pool.get(local_addr).await {
+            Ok(stream) => {
+                info!("Got connection to {} from pool", local_addr);
+                return Ok(LocalConn {
+                    stream,
+                    pooled: true,
+                });
             }
-
-            Err(anyhow::anyhow!("Failed to establish local connection"))
+            Err(e) => {
+                warn!(
+                    "Failed to get connection from pool: {}, falling back to direct connection",
+                    e
+                );
+            }
         }
     }
+
+    // 建立新连接
+    let max_retries = get_local_retries();
+    let retry_delay = get_local_retry_delay();
+
+    for attempt in 1..=max_retries {
+        match TcpStream::connect(local_addr).await {
+            Ok(stream) => {
+                info!(
+                    "Connected to local service: {} (attempt {})",
+                    local_addr, attempt
+                );
+                return Ok(LocalConn {
+                    stream,
+                    pooled: false,
+                });
+            }
+            Err(err) => {
+                if attempt < max_retries {
+                    warn!(
+                        "Failed to connect to {} (attempt {}): {}, retrying...",
+                        local_addr, attempt, err
+                    );
+                    sleep(Duration::from_millis(retry_delay)).await;
+                } else {
+                    error!(
+                        "Failed to connect to {} after {} attempts: {}",
+                        local_addr, max_retries, err
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect to local service {}: {}",
+                        local_addr,
+                        err
+                    ));
+                }
+            }
+        }
+    }
+
+    unreachable!()
 }
