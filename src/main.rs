@@ -124,55 +124,8 @@ async fn main() -> Result<()> {
 /// Generate configuration template
 fn generate_config_template(template_type: &str, output: Option<&str>) -> Result<()> {
     let content = match template_type {
-        "server" => {
-            r#"[server]
-# Server bind address
-bind_addr = "0.0.0.0"
-# Server listen port
-bind_port = 8443
-
-# TLS certificate path
-cert_path = "cert.pem"
-# TLS private key path
-key_path = "key.pem"
-
-# Authentication key (clients must provide the same key to connect)
-# Change this to your own strong password!
-auth_key = "your-secret-auth-key-change-me"
-"#
-        }
-        "client" => {
-            r#"[client]
-# Server address
-server_addr = "example.com"
-# Server port
-server_port = 8443
-
-# Skip certificate verification (for testing only, use false in production)
-skip_verify = false
-
-# CA certificate path (optional, for self-signed certificates)
-# ca_cert_path = "ca.pem"
-
-# Authentication key (must match the server's auth_key)
-# Change this to your own strong password!
-auth_key = "your-secret-auth-key-change-me"
-
-# Proxy configuration list
-[[proxies]]
-name = "web"
-# Server publish port (external access port)
-publish_port = 8080
-# Client local service port (forward to this port)
-local_port = 3000
-
-# You can add multiple proxies
-# [[proxies]]
-# name = "ssh"
-# publish_port = 2222
-# local_port = 22
-"#
-        }
+        "server" => include_str!("../examples/server-template.toml"),
+        "client" => include_str!("../examples/client-template.toml"),
         _ => unreachable!(),
     };
 
