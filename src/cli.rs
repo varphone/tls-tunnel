@@ -14,59 +14,77 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// 运行服务器模式
+    /// Run server mode
     Server {
-        /// 配置文件路径
+        /// Configuration file path
         #[arg(short, long, default_value = "server.toml")]
         config: String,
     },
-    /// 运行客户端模式
+    /// Run client mode
     Client {
-        /// 配置文件路径
+        /// Configuration file path
         #[arg(short, long, default_value = "client.toml")]
         config: String,
     },
-    /// 生成示例配置/证书/systemd 服务文件
-    Generate {
-        /// 配置类型 (server, client, cert, systemd)
-        #[arg(value_parser = ["server", "client", "cert", "systemd"])]
-        config_type: String,
+    /// Generate configuration template
+    Template {
+        /// Template type (server, client)
+        #[arg(value_parser = ["server", "client"])]
+        template_type: String,
 
-        /// 输出文件路径
+        /// Output file path (prints to stdout if not specified)
         #[arg(short, long)]
         output: Option<String>,
+    },
+    /// Generate self-signed TLS certificate
+    Cert {
+        /// Certificate output path
+        #[arg(long, default_value = "cert.pem")]
+        cert_out: String,
 
-        /// 生成自签名证书的输出路径（cert.pem）
-        #[arg(long, value_name = "PATH")]
-        cert_out: Option<String>,
+        /// Private key output path
+        #[arg(long, default_value = "key.pem")]
+        key_out: String,
 
-        /// 生成自签名私钥的输出路径（key.pem）
-        #[arg(long, value_name = "PATH")]
-        key_out: Option<String>,
-
-        /// 证书的 Common Name
+        /// Certificate Common Name
         #[arg(long, default_value = "localhost")]
         common_name: String,
 
-        /// 证书的 SubjectAltName（用逗号分隔多个）
+        /// Certificate SubjectAltName (comma-separated)
         #[arg(long, value_delimiter = ',', value_name = "DNS,...")]
         alt_names: Vec<String>,
-
-        /// 生成 systemd 服务文件的输出路径
-        #[arg(long, value_name = "PATH")]
-        systemd_out: Option<String>,
-
-        /// systemd 服务使用的配置文件路径
-        #[arg(long, value_name = "PATH")]
-        service_config: Option<String>,
-
-        /// systemd 服务使用的可执行文件路径
-        #[arg(long, value_name = "PATH")]
-        service_exec: Option<String>,
     },
-    /// 检查配置文件格式是否正确
+    /// Register as systemd service (Linux only)
+    Register {
+        /// Service type (server, client)
+        #[arg(value_parser = ["server", "client"])]
+        service_type: String,
+
+        /// Configuration file path
+        #[arg(short, long)]
+        config: String,
+
+        /// Service name (default: tls-tunnel-server or tls-tunnel-client)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Executable path (default: current executable)
+        #[arg(long)]
+        exec: Option<String>,
+    },
+    /// Unregister systemd service (Linux only)
+    Unregister {
+        /// Service type (server, client)
+        #[arg(value_parser = ["server", "client"])]
+        service_type: String,
+
+        /// Service name (default: tls-tunnel-server or tls-tunnel-client)
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+    /// Check configuration file validity
     Check {
-        /// 配置文件路径
+        /// Configuration file path
         #[arg(short, long)]
         config: String,
     },

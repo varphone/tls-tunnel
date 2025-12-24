@@ -15,18 +15,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::info;
 
-struct GenerateOptions<'a> {
-    config_type: &'a str,
-    output: Option<&'a str>,
-    cert_out: Option<&'a str>,
-    key_out: Option<&'a str>,
-    common_name: &'a str,
-    alt_names: &'a [String],
-    systemd_out: Option<&'a str>,
-    service_config: Option<&'a str>,
-    service_exec: Option<&'a str>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -48,28 +36,33 @@ async fn main() -> Result<()> {
             check_config(config)?;
             return Ok(());
         }
-        Commands::Generate {
-            config_type,
+        Commands::Template {
+            template_type,
             output,
+        } => {
+            generate_config_template(template_type, output.as_deref())?;
+            return Ok(());
+        }
+        Commands::Cert {
             cert_out,
             key_out,
             common_name,
             alt_names,
-            systemd_out,
-            service_config,
-            service_exec,
         } => {
-            handle_generate(GenerateOptions {
-                config_type,
-                output: output.as_deref(),
-                cert_out: cert_out.as_deref(),
-                key_out: key_out.as_deref(),
-                common_name,
-                alt_names,
-                systemd_out: systemd_out.as_deref(),
-                service_config: service_config.as_deref(),
-                service_exec: service_exec.as_deref(),
-            })?;
+            generate_certificate(cert_out, key_out, common_name, alt_names)?;
+            return Ok(());
+        }
+        Commands::Register {
+            service_type,
+            config,
+            name,
+            exec,
+        } => {
+            register_systemd_service(service_type, config, name.as_deref(), exec.as_deref())?;
+            return Ok(());
+        }
+        Commands::Unregister { service_type, name } => {
+            unregister_systemd_service(service_type, name.as_deref())?;
             return Ok(());
         }
         Commands::Server { config } => {
@@ -121,107 +114,281 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// 处理生成示例配置、证书和 systemd 服务文件
-fn handle_generate(opts: GenerateOptions<'_>) -> Result<()> {
-    match opts.config_type {
-        "server" | "client" => {
-            generate_example_config(opts.config_type, opts.output)?;
-        }
-        "cert" | "systemd" => {
-            // skip config generation
-        }
-        other => {
-            anyhow::bail!("Unsupported generate type: {}", other);
-        }
-    }
+/// Generate configuration template
+fn generate_config_template(template_type: &str, output: Option<&str>) -> Result<()> {
+    let content = match template_type {
+        "server" => {
+            r#"[server]
+# Server bind address
+bind_addr = "0.0.0.0"
+# Server listen port
+bind_port = 8443
 
-    // 是否生成证书
-    let should_gen_cert = match opts.config_type {
-        "cert" => true,
-        _ => opts.cert_out.is_some() || opts.key_out.is_some() || !opts.alt_names.is_empty(),
+# TLS certificate path
+cert_path = "cert.pem"
+# TLS private key path
+key_path = "key.pem"
+
+# Authentication key (clients must provide the same key to connect)
+# Change this to your own strong password!
+auth_key = "your-secret-auth-key-change-me"
+"#
+        }
+        "client" => {
+            r#"[client]
+# Server address
+server_addr = "example.com"
+# Server port
+server_port = 8443
+
+# Skip certificate verification (for testing only, use false in production)
+skip_verify = false
+
+# CA certificate path (optional, for self-signed certificates)
+# ca_cert_path = "ca.pem"
+
+# Authentication key (must match the server's auth_key)
+# Change this to your own strong password!
+auth_key = "your-secret-auth-key-change-me"
+
+# Proxy configuration list
+[[proxies]]
+name = "web"
+# Server publish port (external access port)
+publish_port = 8080
+# Client local service port (forward to this port)
+local_port = 3000
+
+# You can add multiple proxies
+# [[proxies]]
+# name = "ssh"
+# publish_port = 2222
+# local_port = 22
+"#
+        }
+        _ => unreachable!(),
     };
 
-    if should_gen_cert {
-        let cert_path = opts.cert_out.unwrap_or("cert.pem");
-        let key_path = opts.key_out.unwrap_or("key.pem");
-
-        let mut sans = if opts.alt_names.is_empty() {
-            vec![opts.common_name.to_string()]
-        } else {
-            opts.alt_names.to_vec()
-        };
-
-        if !sans.iter().any(|n| n == opts.common_name) {
-            sans.push(opts.common_name.to_string());
-        }
-
-        tls::generate_self_signed_cert(
-            opts.common_name,
-            &sans,
-            Path::new(cert_path),
-            Path::new(key_path),
-        )?;
-
-        println!(
-            "Generated self-signed certificate: {}\nGenerated private key: {}",
-            cert_path, key_path
-        );
-    }
-
-    let should_gen_systemd = match (opts.config_type, opts.systemd_out) {
-        ("systemd", Some(_)) => true,
-        ("systemd", None) => anyhow::bail!("--systemd-out is required when config_type=systemd"),
-        (_, Some(_)) => true,
-        _ => false,
-    };
-
-    if should_gen_systemd {
-        let unit_out = opts.systemd_out.expect("unit path checked above");
-        
-        // 确定实际的服务类型（server 或 client）
-        let service_type = match opts.config_type {
-            "server" | "client" => opts.config_type,
-            "systemd" | "cert" => {
-                // 从 service_config 路径推断类型
-                if let Some(cfg_path) = opts.service_config {
-                    if cfg_path.contains("server") {
-                        "server"
-                    } else if cfg_path.contains("client") {
-                        "client"
-                    } else {
-                        anyhow::bail!(
-                            "Cannot determine service type from config path '{}'. \n\
-                            Please use 'generate server --systemd-out' or 'generate client --systemd-out' instead.",
-                            cfg_path
-                        );
-                    }
-                } else {
-                    anyhow::bail!(
-                        "When config_type is '{}', you must either:\n\
-                        1. Use 'generate server --systemd-out <path>' to generate a server service, or\n\
-                        2. Use 'generate client --systemd-out <path>' to generate a client service, or\n\
-                        3. Provide --service-config with a path containing 'server' or 'client'",
-                        opts.config_type
-                    );
-                }
-            }
-            other => anyhow::bail!("Unexpected config_type: {}", other),
-        };
-        
-        generate_systemd_unit(
-            service_type,
-            Path::new(unit_out),
-            opts.service_exec,
-            opts.service_config,
-        )?;
-
-        println!("Generated {} systemd service file: {}", service_type, unit_out);
+    if let Some(path) = output {
+        std::fs::write(path, content)
+            .with_context(|| format!("Failed to write config template to {}", path))?;
+        println!("Generated {} configuration template: {}", template_type, path);
+    } else {
+        println!("{}", content);
     }
 
     Ok(())
 }
 
-/// 确保服务器 TLS 证书与私钥可用；若未配置则在运行时生成自签名证书
+/// Generate self-signed TLS certificate
+fn generate_certificate(
+    cert_out: &str,
+    key_out: &str,
+    common_name: &str,
+    alt_names: &[String],
+) -> Result<()> {
+    let mut sans = if alt_names.is_empty() {
+        vec![common_name.to_string()]
+    } else {
+        alt_names.to_vec()
+    };
+
+    if !sans.iter().any(|n| n == common_name) {
+        sans.push(common_name.to_string());
+    }
+
+    tls::generate_self_signed_cert(
+        common_name,
+        &sans,
+        Path::new(cert_out),
+        Path::new(key_out),
+    )?;
+
+    println!("Generated self-signed certificate: {}", cert_out);
+    println!("Generated private key: {}", key_out);
+
+    Ok(())
+}
+
+/// Register as systemd service (Linux only)
+fn register_systemd_service(
+    _service_type: &str,
+    _config: &str,
+    _name: Option<&str>,
+    _exec: Option<&str>,
+) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        anyhow::bail!("Service registration is only supported on Linux");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        let service_name = _name.unwrap_or_else(|| match _service_type {
+            "server" => "tls-tunnel-server",
+            "client" => "tls-tunnel-client",
+            _ => unreachable!(),
+        });
+
+        let exec_path = if let Some(custom) = _exec {
+            custom.to_string()
+        } else {
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "tls-tunnel".to_string())
+        };
+
+        let config_path = std::fs::canonicalize(_config)
+            .with_context(|| format!("Failed to resolve config path: {}", config))?
+            .to_string_lossy()
+            .into_owned();
+
+        let description = match _service_type {
+            "server" => "TLS Tunnel Server",
+            "client" => "TLS Tunnel Client",
+            _ => unreachable!(),
+        };
+
+        let unit_content = format!(
+            "[Unit]\n\
+            Description={}\n\
+            After=network-online.target\n\
+            Wants=network-online.target\n\
+            \n\
+            [Service]\n\
+            Type=simple\n\
+            ExecStart={} {} --config {}\n\
+            Restart=on-failure\n\
+            RestartSec=3\n\
+            Environment=RUST_LOG=info\n\
+            \n\
+            [Install]\n\
+            WantedBy=multi-user.target\n",
+            description, exec_path, _service_type, config_path
+        );
+
+        let unit_file = format!("/etc/systemd/system/{}.service", service_name);
+
+        // Write systemd unit file
+        std::fs::write(&unit_file, unit_content)
+            .with_context(|| format!("Failed to write systemd unit file to {}", unit_file))?;
+
+        println!("✓ Created systemd service file: {}", unit_file);
+
+        // Reload systemd daemon
+        let output = Command::new("systemctl")
+            .arg("daemon-reload")
+            .output()
+            .context("Failed to reload systemd daemon")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to reload systemd daemon: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        println!("✓ Reloaded systemd daemon");
+
+        // Enable service
+        let output = Command::new("systemctl")
+            .arg("enable")
+            .arg(format!("{}.service", service_name))
+            .output()
+            .context("Failed to enable service")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to enable service: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        println!("✓ Enabled {} service", service_name);
+        println!("\nService registered successfully!");
+        println!("Start service: sudo systemctl start {}", service_name);
+        println!("Check status:  sudo systemctl status {}", service_name);
+        println!("View logs:     sudo journalctl -u {} -f", service_name);
+
+        Ok(())
+    }
+}
+
+/// Unregister systemd service (Linux only)
+fn unregister_systemd_service(_service_type: &str, _name: Option<&str>) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        anyhow::bail!("Service unregistration is only supported on Linux");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        let service_name = _name.unwrap_or_else(|| match _service_type {
+            "server" => "tls-tunnel-server",
+            "client" => "tls-tunnel-client",
+            _ => unreachable!(),
+        });
+
+        let unit_file = format!("/etc/systemd/system/{}.service", service_name);
+
+        // Check if service exists
+        if !Path::new(&unit_file).exists() {
+            anyhow::bail!("Service {} not found", service_name);
+        }
+
+        // Stop service if running
+        let output = Command::new("systemctl")
+            .arg("stop")
+            .arg(format!("{}.service", service_name))
+            .output()
+            .context("Failed to stop service")?;
+
+        if output.status.success() {
+            println!("✓ Stopped {} service", service_name);
+        }
+
+        // Disable service
+        let output = Command::new("systemctl")
+            .arg("disable")
+            .arg(format!("{}.service", service_name))
+            .output()
+            .context("Failed to disable service")?;
+
+        if output.status.success() {
+            println!("✓ Disabled {} service", service_name);
+        }
+
+        // Remove service file
+        std::fs::remove_file(&unit_file)
+            .with_context(|| format!("Failed to remove service file: {}", unit_file))?;
+
+        println!("✓ Removed service file: {}", unit_file);
+
+        // Reload systemd daemon
+        let output = Command::new("systemctl")
+            .arg("daemon-reload")
+            .output()
+            .context("Failed to reload systemd daemon")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to reload systemd daemon: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        println!("✓ Reloaded systemd daemon");
+        println!("\nService unregistered successfully!");
+
+        Ok(())
+    }
+}
+
+/// Ensure server TLS certificates are available; generate self-signed certificates at runtime if not configured
 fn ensure_server_certs(config: &config::ServerConfig) -> Result<(PathBuf, PathBuf)> {
     match (&config.cert_path, &config.key_path) {
         (Some(cert), Some(key)) => Ok((cert.clone(), key.clone())),
@@ -257,47 +424,7 @@ fn ensure_server_certs(config: &config::ServerConfig) -> Result<(PathBuf, PathBu
     }
 }
 
-/// 生成 systemd 服务文件
-fn generate_systemd_unit(
-    mode: &str,
-    output: &Path,
-    exec_path: Option<&str>,
-    config_path: Option<&str>,
-) -> Result<()> {
-    let exec = if let Some(custom) = exec_path {
-        custom.to_string()
-    } else {
-        std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "tls-tunnel".to_string())
-    };
-
-    let config = if let Some(custom) = config_path {
-        custom.to_string()
-    } else if mode == "server" {
-        "/etc/tls-tunnel/server.toml".to_string()
-    } else {
-        "/etc/tls-tunnel/client.toml".to_string()
-    };
-
-    let description = if mode == "server" {
-        "TLS Tunnel Server"
-    } else {
-        "TLS Tunnel Client"
-    };
-
-    let unit = format!(
-        "[Unit]\nDescription={}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} {} --config {}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=multi-user.target\n",
-        description, exec, mode, config
-    );
-
-    std::fs::write(output, unit)
-        .with_context(|| format!("Failed to write systemd unit to {:?}", output))?;
-
-    Ok(())
-}
-
-/// 检查配置文件格式
+/// Check configuration file format
 fn check_config(config_path: &str) -> Result<()> {
     use std::path::Path;
 
@@ -410,68 +537,3 @@ fn check_config(config_path: &str) -> Result<()> {
     }
 }
 
-/// 生成示例配置文件
-fn generate_example_config(config_type: &str, output: Option<&str>) -> Result<()> {
-    let content = match config_type {
-        "server" => {
-            r#"[server]
-# 服务器绑定地址
-bind_addr = "0.0.0.0"
-# 服务器监听端口
-bind_port = 8443
-
-# TLS 证书路径
-cert_path = "cert.pem"
-# TLS 私钥路径
-key_path = "key.pem"
-
-# 认证密钥（客户端必须提供相同的密钥才能连接）
-# 请修改为你自己的强密码！
-auth_key = "your-secret-auth-key-change-me"
-"#
-        }
-        "client" => {
-            r#"[client]
-# 服务器地址
-server_addr = "example.com"
-# 服务器端口
-server_port = 8443
-
-# 是否跳过证书验证（仅用于测试，生产环境请设置为 false）
-skip_verify = false
-
-# CA 证书路径（可选，如果使用自签名证书）
-# ca_cert_path = "ca.pem"
-
-# 认证密钥（必须与服务器配置中的密钥一致）
-# 请修改为你自己的强密码！
-auth_key = "your-secret-auth-key-change-me"
-
-# 代理配置列表
-[[proxies]]
-name = "web"
-# 服务器发布端口（外部访问该端口）
-publish_port = 8080
-# 客户端本地服务端口（转发到该端口）
-local_port = 3000
-
-# 可以添加多个代理
-# [[proxies]]
-# name = "ssh"
-# publish_port = 2222
-# local_port = 22
-"#
-        }
-        _ => unreachable!(),
-    };
-
-    if let Some(path) = output {
-        std::fs::write(path, content)
-            .with_context(|| format!("Failed to write config to {}", path))?;
-        println!("Generated {} configuration file: {}", config_type, path);
-    } else {
-        println!("{}", content);
-    }
-
-    Ok(())
-}
