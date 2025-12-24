@@ -92,4 +92,14 @@ pub enum Commands {
         #[arg(short, long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
     },
+    /// View real-time server statistics (requires stats_port configured)
+    Top {
+        /// Server statistics URL (e.g., http://localhost:8080)
+        #[arg(short, long)]
+        url: String,
+
+        /// Refresh interval in seconds
+        #[arg(short, long, default_value = "2")]
+        interval: u64,
+    },
 }

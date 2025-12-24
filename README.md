@@ -18,6 +18,7 @@
 - 📋 **错误反馈**（服务器拒绝连接时返回详细错误信息）
 - 🌐 **多传输协议**（支持 TLS、HTTP/2、WebSocket）
 - 🔧 **反向代理支持**（支持在 Nginx 等代理服务器后端运行）
+- 📊 **实时监控**（内置统计服务器和终端监控工具）
 
 ## 传输协议
 
@@ -413,6 +414,9 @@ tls-tunnel/
 
 - **快速开始**：[快速入门指南](docs/guides/QUICKSTART.md)
 - **使用示例**：[详细使用示例](docs/guides/EXAMPLES.md)
+- **监控统计**：
+  - [统计功能说明](docs/STATISTICS.md)
+  - [Top 命令使用指南](docs/TOP_USAGE.md)
 - **开发文档**：
   - [架构设计](docs/development/ARCHITECTURE.md)
   - [协议说明](docs/development/PROTOCOL.md)

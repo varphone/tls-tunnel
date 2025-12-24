@@ -5,6 +5,7 @@ mod connection_pool;
 mod server;
 mod stats;
 mod tls;
+mod top;
 mod transport;
 
 use anyhow::{Context, Result};
@@ -150,6 +151,11 @@ async fn main() -> Result<()> {
 
             // Run client
             client::run_client(client_config, connector).await?;
+        }
+        Commands::Top { url, interval } => {
+            // Run statistics dashboard
+            top::run_dashboard(url.clone(), *interval).await?;
+            return Ok(());
         }
     }
 

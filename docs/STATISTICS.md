@@ -95,6 +95,32 @@ curl -s http://server-ip:9090/stats | jq .
 curl http://server-ip:9090/
 ```
 
+### Built-in Top Command
+
+The `tls-tunnel` binary includes a built-in `top` command for real-time monitoring in your terminal:
+
+```bash
+# View real-time statistics with interactive terminal UI
+tls-tunnel top --url http://localhost:9090
+
+# Custom refresh interval (default: 2 seconds)
+tls-tunnel top --url http://localhost:9090 --interval 5
+
+# Short form
+tls-tunnel top -u http://localhost:9090 -i 5
+```
+
+The `top` command provides:
+- **Real-time Dashboard**: Beautiful terminal UI powered by ratatui
+- **Auto-refresh**: Configurable refresh interval (default 2 seconds)
+- **Interactive Controls**: 
+  - `q` or `Esc`: Quit
+  - `r`: Manual refresh
+- **Formatted Display**: Human-readable bytes and durations
+- **Color Coding**: Active connections highlighted in green
+
+For detailed `top` command usage, see [TOP_USAGE.md](TOP_USAGE.md).
+
 ## Security Considerations
 
 ⚠️ **Important Security Notes:**
