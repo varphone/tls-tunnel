@@ -70,13 +70,7 @@ src/transport/
 
 ### 🚧 待实现
 
-1. **WebSocket 传输** (`src/transport/wss.rs`)
-   - 使用 tokio-tungstenite 实现 WSS
-   - WebSocket 协议升级
-   - 二进制帧传输隧道数据
-   - **状态**: 占位实现，待完成
-
-2. **客户端/服务器集成**
+1. **客户端/服务器集成**
    - 修改 `client.rs` 使用传输层抽象
    - 修改 `server.rs` 使用传输层抽象
    - 根据配置动态选择传输方式
@@ -88,6 +82,14 @@ src/transport/
 - `Http2TransportServer`: 接受 HTTP/2 CONNECT 请求
 - `Http2Stream`: 包装 H2 的 SendStream + RecvStream 实现 AsyncRead/AsyncWrite
 - 支持 HTTP/2 流量控制和多路复用
+- **完全实现并通过编译** ✅
+
+**WebSocket 传输实现** (`src/transport/wss.rs`)
+- `WssTransportClient`: 通过 WebSocket Secure 建立客户端隧道
+- `WssTransportServer`: 接受 WebSocket 连接
+- `WssStream<S>`: 泛型包装器，将 WebSocketStream 实现为 AsyncRead/AsyncWrite
+- 支持二进制帧传输
+- 自动处理 Ping/Pong 消息
 - **完全实现并通过编译** ✅
 
 ## 配置示例
