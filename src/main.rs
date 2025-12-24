@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod connection_pool;
 mod server;
+mod stats;
 mod tls;
 mod transport;
 

@@ -1,0 +1,11 @@
+# Test server configuration with stats enabled
+[server]
+bind_addr = "127.0.0.1"
+bind_port = 3080
+transport = "tls"
+cert_path = "examples/certs/cert.pem"
+key_path = "examples/certs/key.pem"
+auth_key = "test-secret-key-12345"
+behind_proxy = false
+# Enable stats server on port 9090
+stats_port = 9090

@@ -82,6 +82,9 @@ pub struct ServerConfig {
     pub key_path: Option<PathBuf>,
     /// 认证密钥（用于客户端认证）
     pub auth_key: String,
+    /// 统计信息 HTTP 服务器端口（可选）
+    #[serde(default)]
+    pub stats_port: Option<u16>,
 }
 
 /// 客户端配置

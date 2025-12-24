@@ -1,0 +1,17 @@
+# Test client configuration
+[client]
+server_addr = "127.0.0.1"
+server_port = 3080
+transport = "tls"
+auth_key = "test-secret-key-12345"
+insecure = true  # Skip certificate verification for self-signed cert
+
+[[proxies]]
+name = "test-web"
+publish_port = 8888
+local_port = 8080
+
+[[proxies]]
+name = "test-ssh"
+publish_port = 2222
+local_port = 22
