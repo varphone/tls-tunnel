@@ -257,14 +257,14 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
 
     info!("Yamux connection established");
 
-    // 处理来自服务器的流请求
+    // Handle stream requests from server
     use futures::future::poll_fn;
-    eprintln!("CLIENT: Entering yamux loop");
+    tracing::debug!("Entering yamux loop");
     loop {
-        eprintln!("CLIENT: Polling for next inbound stream...");
+        tracing::trace!("Polling for next inbound stream");
         let stream_result = poll_fn(|cx| yamux_conn.poll_next_inbound(cx)).await;
-        eprintln!(
-            "CLIENT: poll_next_inbound returned: {:?}",
+        tracing::trace!(
+            "poll_next_inbound returned: {:?}",
             match &stream_result {
                 Some(Ok(_)) => "Some(Ok(stream))",
                 Some(Err(_e)) => "Some(Err)",
@@ -286,19 +286,17 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
                 });
             }
             Some(Err(e)) => {
-                eprintln!("CLIENT: Yamux error: {}", e);
                 error!("Yamux error: {}", e);
                 break;
             }
             None => {
-                eprintln!("CLIENT: Yamux connection closed by server");
                 info!("Yamux connection closed by server");
                 break;
             }
         }
     }
 
-    eprintln!("CLIENT: Exited yamux loop");
+    tracing::debug!("Exited yamux loop");
     info!("Client disconnected");
     Ok(())
 }

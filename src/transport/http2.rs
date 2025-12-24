@@ -227,14 +227,14 @@ impl TransportClient for Http2TransportClient {
             tls_conn.alpn_protocol()
         );
 
-        // 2. 建立 HTTP/2 连接
+        // 2. Establish HTTP/2 connection
         let (send_request, connection) = h2::client::handshake(tls_stream)
             .await
             .context("HTTP/2 handshake failed")?;
         tracing::debug!("HTTP/2 client: HTTP/2 handshake completed");
 
-        // 在后台运行 HTTP/2 连接 driver
-        // 这是必须的，因为connection需要被持续poll才能处理帧
+        // Run HTTP/2 connection driver in background
+        // This is required because the connection needs to be continuously polled to process frames
         tokio::spawn(async move {
             tracing::debug!("HTTP/2 client: Connection driver started");
             if let Err(e) = connection.await {
@@ -244,32 +244,32 @@ impl TransportClient for Http2TransportClient {
             }
         });
 
-        //给 driver 一点时间启动
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Note: The send_request is already ready after handshake completes
+        // No need for additional delay as the driver runs concurrently
 
-        // 3. 发送 CONNECT 请求建立隧道
-        // 注意：CONNECT 请求的 URI 应该是目标地址（authority），不是路径
+        // 3. Send CONNECT request to establish tunnel
+        // Note: CONNECT request URI should be the target address (authority), not a path
         tracing::debug!("HTTP/2 client: Sending CONNECT request");
         let request = http::Request::builder()
             .method(http::Method::CONNECT)
-            .uri(&self.server_addr) // CONNECT 使用 authority，不是路径
+            .uri(&self.server_addr) // CONNECT uses authority, not path
             .version(http::Version::HTTP_2)
             .body(())
             .context("Failed to build CONNECT request")?;
 
-        // 等待发送器准备好
+        // Wait for sender to be ready
         let mut send_request = send_request
             .ready()
             .await
             .context("send_request ready() failed")?;
 
-        // false 表示这不是最后一个帧，还有数据要发送
+        // false indicates this is not the last frame, more data will be sent
         let (response_fut, send_stream) = send_request
             .send_request(request, false)
             .context("Failed to send CONNECT request")?;
         tracing::debug!("HTTP/2 client: CONNECT request sent, waiting for response");
 
-        // 等待服务器响应
+        // Wait for server response
         let response = response_fut
             .await
             .context("Failed to receive CONNECT response")?;

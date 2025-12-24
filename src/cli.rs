@@ -87,5 +87,9 @@ pub enum Commands {
         /// Configuration file path
         #[arg(short, long)]
         config: String,
+
+        /// Output format (text, json)
+        #[arg(short, long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
     },
 }
