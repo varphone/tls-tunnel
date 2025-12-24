@@ -3,19 +3,19 @@
 ## 📊 项目完成度概览
 
 **当前版本**: v1.1.0  
-**总体完成度**: ~65%
+**总体完成度**: ~70%
 
 | 类别 | 完成项 | 总计 | 完成度 |
 |------|--------|------|--------|
 | 代码质量 | 6/6 | 100% | ✅ |
-| 功能增强 | 9/9 | 100% | ✅ |
+| 功能增强 | 10/10 | 100% | ✅ |
 | 性能优化 | 1/3 | 33% | 🔄 |
 | 监控统计 | 4/5 | 80% | ✅ |
 | 安全增强 | 0/3 | 0% | ⏳ |
 | 配置管理 | 1/3 | 33% | 🔄 |
 | 可观测性 | 0/3 | 0% | ⏳ |
 | 用户体验 | 3/3 | 100% | ✅ |
-| 高级功能 | 0/3 | 0% | ⏳ |
+| 高级功能 | 1/4 | 25% | 🔄 |
 | 测试质量 | 1/4 | 25% | 🔄 |
 
 **图例**: ✅ 已完成 | 🔄 进行中 | ⏳ 计划中
@@ -103,6 +103,9 @@ export TLS_TUNNEL_LOCAL_CONNECT_RETRIES=5
 ./tls-tunnel check -c client.toml
 ```
 
+#### 2.6 配置模板生成
+- ✅ 内置配置模板生成工具
+
 使用示例：
 ```bash
 # 生成服务器配置到标准输出
@@ -124,6 +127,48 @@ export TLS_TUNNEL_LOCAL_CONNECT_RETRIES=5
 - ✅ 清理冗余日志输出
   - 移除客户端中的重复日志
   - 保持简洁的控制台输出
+
+#### 2.8 Visitor 模式支持
+- ✅ 实现反向访问功能
+  - 客户端可以访问服务器端的服务
+  - 通过 `[[visitors]]` 配置
+  - 在客户端绑定本地端口
+  - 通过隧道连接到服务器端服务
+- ✅ 配置示例和文档
+  - [examples/visitor-client.toml](../examples/visitor-client.toml)
+  - [examples/visitor-server.toml](../examples/visitor-server.toml)
+  - [docs/guides/VISITOR.md](../docs/guides/VISITOR.md)
+- ✅ 使用场景：
+  - 访问服务器数据库（MySQL、PostgreSQL、Redis）
+  - 访问内部 API 服务
+  - 远程开发调试
+  - 安全访问敏感服务（不在公网暴露端口）
+
+使用示例：
+```toml
+# 客户端配置
+[[visitors]]
+name = "mysql"
+bind_addr = "127.0.0.1"
+bind_port = 3306
+server_name = "mysql-server"  # 服务器端的 proxy 名称
+
+# 服务器配置
+[[proxies]]
+name = "mysql-server"
+type = "tcp"
+local_addr = "127.0.0.1"
+local_port = 3306
+# 不配置 publish_addr/publish_port，只用于 visitor
+```
+
+工作原理：
+1. 客户端在本地监听 3306 端口
+2. 本地应用连接到 127.0.0.1:3306
+3. 客户端通过 yamux 创建 stream 到服务器
+4. 服务器根据 server_name 查找对应的 proxy
+5. 服务器连接到本地 MySQL 服务
+6. 双向转发数据
 
 ## 📋 建议的未来改进
 

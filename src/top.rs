@@ -93,7 +93,11 @@ impl Dashboard {
         };
 
         let header = Paragraph::new(title)
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .block(Block::default().borders(Borders::ALL));
 
         f.render_widget(header, area);
@@ -139,12 +143,13 @@ impl Dashboard {
                     Cell::from(stat.name.clone()),
                     Cell::from(format!("{}:{}", stat.publish_addr, stat.publish_port)),
                     Cell::from(stat.local_port.to_string()),
-                    Cell::from(stat.active_connections.to_string())
-                        .style(Style::default().fg(if stat.active_connections > 0 {
+                    Cell::from(stat.active_connections.to_string()).style(Style::default().fg(
+                        if stat.active_connections > 0 {
                             Color::Green
                         } else {
                             Color::Gray
-                        })),
+                        },
+                    )),
                     Cell::from(stat.total_connections.to_string()),
                     Cell::from(bytes_sent),
                     Cell::from(bytes_received),
@@ -192,9 +197,19 @@ impl Dashboard {
     fn render_footer(&self, f: &mut Frame, area: Rect) {
         let footer_text = vec![Line::from(vec![
             Span::styled("Press ", Style::default().fg(Color::Gray)),
-            Span::styled("'q'", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "'q'",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to quit, ", Style::default().fg(Color::Gray)),
-            Span::styled("'r'", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "'r'",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to refresh, ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("Auto-refresh: {}s", self.interval.as_secs()),

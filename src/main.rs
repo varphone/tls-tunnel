@@ -33,7 +33,7 @@ struct CheckResult {
 fn expand_path(path: &str) -> Result<String> {
     let expanded = shellexpand::tilde(path);
     let path_buf = PathBuf::from(expanded.as_ref());
-    
+
     if path_buf.is_absolute() {
         Ok(expanded.into_owned())
     } else {
@@ -173,7 +173,10 @@ fn generate_config_template(template_type: &str, output: Option<&str>) -> Result
     if let Some(path) = output {
         std::fs::write(path, content)
             .with_context(|| format!("Failed to write config template to {}", path))?;
-        println!("Generated {} configuration template: {}", template_type, path);
+        println!(
+            "Generated {} configuration template: {}",
+            template_type, path
+        );
     } else {
         println!("{}", content);
     }
@@ -198,12 +201,7 @@ fn generate_certificate(
         sans.push(common_name.to_string());
     }
 
-    tls::generate_self_signed_cert(
-        common_name,
-        &sans,
-        Path::new(cert_out),
-        Path::new(key_out),
-    )?;
+    tls::generate_self_signed_cert(common_name, &sans, Path::new(cert_out), Path::new(key_out))?;
 
     println!("Generated self-signed certificate: {}", cert_out);
     println!("Generated private key: {}", key_out);
@@ -465,7 +463,7 @@ fn check_config(config_path: &str, format: &str) -> Result<()> {
             (Some(cert), Some(key)) => {
                 details["cert_path"] = serde_json::json!(cert);
                 details["key_path"] = serde_json::json!(key);
-                
+
                 if !cert.exists() {
                     warnings.push(format!("Certificate file not found: {:?}", cert));
                 }
@@ -482,14 +480,18 @@ fn check_config(config_path: &str, format: &str) -> Result<()> {
                         valid: false,
                         config_type: "server".to_string(),
                         warnings,
-                        error: Some("cert_path and key_path must both be set, or both omitted".to_string()),
+                        error: Some(
+                            "cert_path and key_path must both be set, or both omitted".to_string(),
+                        ),
                         details,
                     };
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 } else {
                     println!("✗ cert_path/key_path mismatch: set both, or leave both empty to auto-generate");
                 }
-                anyhow::bail!("cert_path and key_path must both be set, or both omitted to auto-generate");
+                anyhow::bail!(
+                    "cert_path and key_path must both be set, or both omitted to auto-generate"
+                );
             }
         }
 
@@ -646,4 +648,3 @@ fn check_config(config_path: &str, format: &str) -> Result<()> {
         }
     }
 }
-

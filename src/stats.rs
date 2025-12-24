@@ -118,10 +118,7 @@ impl StatsManager {
         local_port: u16,
     ) -> ProxyStatsTracker {
         let tracker = ProxyStatsTracker::new(name.clone(), publish_addr, publish_port, local_port);
-        self.proxies
-            .lock()
-            .unwrap()
-            .insert(name, tracker.clone());
+        self.proxies.lock().unwrap().insert(name, tracker.clone());
         tracker
     }
 

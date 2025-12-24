@@ -55,6 +55,27 @@ fn default_publish_addr() -> String {
     "0.0.0.0".to_string()
 }
 
+fn default_bind_addr() -> String {
+    "127.0.0.1".to_string()
+}
+
+/// Visitor 配置（客户端主动访问其他客户端的服务）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisitorConfig {
+    /// Visitor 名称（对应目标 proxy 的 name）
+    pub name: String,
+    /// 代理类型
+    #[serde(default)]
+    pub proxy_type: ProxyType,
+    /// 客户端本地绑定地址（默认 127.0.0.1）
+    #[serde(default = "default_bind_addr")]
+    pub bind_addr: String,
+    /// 客户端本地绑定端口（本地应用连接此端口）
+    pub bind_port: u16,
+    /// 目标 proxy 的 publish_port（用于精确匹配，当有多个同名 proxy 时）
+    pub publish_port: u16,
+}
+
 /// 服务器端配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -112,9 +133,12 @@ fn default_server_path() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientFullConfig {
     pub client: ClientConfig,
-    /// 代理配置列表
+    /// 代理配置列表（提供给外部访问的服务）
     #[serde(default)]
     pub proxies: Vec<ProxyConfig>,
+    /// Visitor 配置列表（访问服务器端的服务）
+    #[serde(default)]
+    pub visitors: Vec<VisitorConfig>,
 }
 
 impl ServerConfig {
@@ -145,8 +169,8 @@ impl ClientFullConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         use std::collections::HashSet;
 
-        if self.proxies.is_empty() {
-            anyhow::bail!("No proxy configurations defined");
+        if self.proxies.is_empty() && self.visitors.is_empty() {
+            anyhow::bail!("No proxy or visitor configurations defined");
         }
 
         let mut seen_names = HashSet::new();
@@ -194,6 +218,47 @@ impl ClientFullConfig {
 
             if proxy.publish_addr.trim().is_empty() {
                 anyhow::bail!("Proxy '{}': publish_addr cannot be empty", proxy.name);
+            }
+        }
+
+        // 验证 visitors 配置
+        let mut seen_visitor_names = HashSet::new();
+        let mut seen_visitor_binds = HashSet::new();
+
+        for visitor in &self.visitors {
+            // 检查 name 唯一性
+            if !seen_visitor_names.insert(&visitor.name) {
+                anyhow::bail!(
+                    "Duplicate visitor name '{}': each visitor must have a unique name",
+                    visitor.name
+                );
+            }
+
+            // 检查 (bind_addr, bind_port) 唯一性
+            if !seen_visitor_binds.insert((visitor.bind_addr.clone(), visitor.bind_port)) {
+                anyhow::bail!(
+                    "Duplicate visitor binding {}:{}: each visitor must use a different local bind address/port",
+                    visitor.bind_addr,
+                    visitor.bind_port
+                );
+            }
+
+            // 验证端口范围
+            if visitor.bind_port == 0 {
+                anyhow::bail!("Visitor '{}': bind_port cannot be 0", visitor.name);
+            }
+
+            if visitor.publish_port == 0 {
+                anyhow::bail!("Visitor '{}': publish_port cannot be 0", visitor.name);
+            }
+
+            // 验证名称不为空
+            if visitor.name.trim().is_empty() {
+                anyhow::bail!("Visitor name cannot be empty");
+            }
+
+            if visitor.bind_addr.trim().is_empty() {
+                anyhow::bail!("Visitor '{}': bind_addr cannot be empty", visitor.name);
             }
         }
 

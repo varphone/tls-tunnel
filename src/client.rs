@@ -1,4 +1,4 @@
-use crate::config::{ClientFullConfig, ProxyType};
+use crate::config::{ClientFullConfig, ProxyType, VisitorConfig};
 use crate::connection_pool::{ConnectionPool, PoolConfig};
 use crate::transport::create_transport_client;
 use anyhow::{Context, Result};
@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Duration};
 use tokio_rustls::TlsConnector;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -47,9 +47,10 @@ fn get_local_retry_delay() -> u64 {
 }
 
 #[derive(Serialize)]
-struct ProxyMessage<'a> {
+struct ClientConfigMessage<'a> {
     version: u8,
     proxies: &'a [crate::config::ProxyConfig],
+    visitors: &'a [crate::config::VisitorConfig],
 }
 
 /// 读取服务器返回的错误消息
@@ -152,7 +153,7 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
 
     info!("Authentication successful");
 
-    send_proxies_json(&config, &mut tls_stream).await?;
+    send_client_config(&config, &mut tls_stream).await?;
 
     // 检查服务器是否接受配置（读取一个确认字节）
     let mut config_result = [0u8; 1];
@@ -257,31 +258,61 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
 
     info!("Yamux connection established");
 
-    // Handle stream requests from server
+    // 创建channel用于visitor请求新的yamux stream
+    let (visitor_stream_tx, mut visitor_stream_rx) =
+        tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>(100);
+
+    // 启动 visitor 监听器
+    if !config.visitors.is_empty() {
+        info!("Starting {} visitor listeners...", config.visitors.len());
+
+        for visitor in &config.visitors {
+            let visitor_clone = visitor.clone();
+            let visitor_name = visitor.name.clone();
+            let stream_tx_clone = visitor_stream_tx.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = run_visitor_listener(visitor_clone, stream_tx_clone).await {
+                    error!("Visitor '{}' listener error: {}", visitor_name, e);
+                }
+            });
+        }
+    }
+
+    // Handle stream requests from server and visitor stream requests
     use futures::future::poll_fn;
     loop {
-        let stream_result = poll_fn(|cx| yamux_conn.poll_next_inbound(cx)).await;
+        tokio::select! {
+            // 处理服务器发来的 inbound stream 请求（正常的 proxy 模式）
+            stream_result = poll_fn(|cx| yamux_conn.poll_next_inbound(cx)) => {
+                match stream_result {
+                    Some(Ok(stream)) => {
+                        info!("Received new stream from server");
 
-        match stream_result {
-            Some(Ok(stream)) => {
-                info!("Received new stream from server");
+                        let config = config.clone();
+                        let proxy_pools = proxy_pools.clone();
 
-                let config = config.clone();
-                let proxy_pools = proxy_pools.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) = handle_stream(stream, config, proxy_pools).await {
-                        error!("Stream handling error: {}", e);
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_stream(stream, config, proxy_pools).await {
+                                error!("Stream handling error: {}", e);
+                            }
+                        });
                     }
-                });
+                    Some(Err(e)) => {
+                        error!("Yamux error: {}", e);
+                        break;
+                    }
+                    None => {
+                        info!("Yamux connection closed by server");
+                        break;
+                    }
+                }
             }
-            Some(Err(e)) => {
-                error!("Yamux error: {}", e);
-                break;
-            }
-            None => {
-                info!("Yamux connection closed by server");
-                break;
+
+            // 处理 visitor 请求创建新的 outbound stream
+            Some(response_tx) = visitor_stream_rx.recv() => {
+                let stream_result = poll_fn(|cx| yamux_conn.poll_new_outbound(cx)).await;
+                let _ = response_tx.send(stream_result.map_err(|e| anyhow::anyhow!("Failed to create yamux stream: {}", e)));
             }
         }
     }
@@ -290,13 +321,14 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     Ok(())
 }
 
-async fn send_proxies_json<S>(config: &ClientFullConfig, tls_stream: &mut S) -> Result<()>
+async fn send_client_config<S>(config: &ClientFullConfig, tls_stream: &mut S) -> Result<()>
 where
     S: AsyncWriteExt + Unpin,
 {
-    let msg = ProxyMessage {
+    let msg = ClientConfigMessage {
         version: PROTOCOL_VERSION,
         proxies: &config.proxies,
+        visitors: &config.visitors,
     };
 
     let json = serde_json::to_vec(&msg)?;
@@ -464,4 +496,155 @@ async fn connect_local(
     }
 
     unreachable!()
+}
+
+/// 运行 visitor 监听器
+/// 在客户端本地监听端口，接受连接后通过 yamux 连接到服务器
+async fn run_visitor_listener(
+    visitor: VisitorConfig,
+    stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+) -> Result<()> {
+    let bind_addr = format!("{}:{}", visitor.bind_addr, visitor.bind_port);
+
+    info!(
+        "Visitor '{}': Binding to {} -> proxy name '{}' port {}",
+        visitor.name, visitor.bind_addr, visitor.name, visitor.publish_port
+    );
+
+    let listener = TcpListener::bind(&bind_addr)
+        .await
+        .with_context(|| format!("Failed to bind visitor to {}", bind_addr))?;
+
+    info!("Visitor '{}': Listening on {}", visitor.name, bind_addr);
+
+    loop {
+        match listener.accept().await {
+            Ok((local_stream, peer_addr)) => {
+                info!(
+                    "Visitor '{}': Accepted connection from {}",
+                    visitor.name, peer_addr
+                );
+
+                let visitor_clone = visitor.clone();
+                let stream_tx_clone = stream_tx.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        handle_visitor_connection(local_stream, &visitor_clone, stream_tx_clone)
+                            .await
+                    {
+                        error!(
+                            "Visitor '{}' connection handling error: {}",
+                            visitor_clone.name, e
+                        );
+                    }
+                });
+            }
+            Err(e) => {
+                error!("Visitor '{}': Accept error: {}", visitor.name, e);
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// 处理 visitor 连接
+/// 创建 yamux stream 到服务器，发送目标 proxy 名称，然后双向转发数据
+async fn handle_visitor_connection(
+    mut local_stream: TcpStream,
+    visitor: &VisitorConfig,
+    stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+) -> Result<()> {
+    // 请求创建新的 yamux stream
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    stream_tx
+        .send(response_tx)
+        .await
+        .context("Failed to request yamux stream")?;
+
+    // 等待 yamux stream 创建完成
+    let server_stream = response_rx
+        .await
+        .context("Failed to receive yamux stream")??;
+
+    info!(
+        "Visitor '{}': Opened stream to server for proxy '{}' port {}",
+        visitor.name, visitor.name, visitor.publish_port
+    );
+
+    // 将 yamux stream 转换为兼容的 tokio stream
+    use tokio_util::compat::FuturesAsyncReadCompatExt;
+    let mut server_stream_tokio = server_stream.compat();
+
+    // 发送目标 proxy 名称长度、名称和 publish_port
+    let name_bytes = visitor.name.as_bytes();
+    let name_len = (name_bytes.len() as u16).to_be_bytes();
+    server_stream_tokio.write_all(&name_len).await?;
+    server_stream_tokio.write_all(name_bytes).await?;
+
+    let port_bytes = visitor.publish_port.to_be_bytes();
+    server_stream_tokio.write_all(&port_bytes).await?;
+    server_stream_tokio.flush().await?;
+
+    info!(
+        "Visitor '{}': Sent target proxy name '{}' port {}",
+        visitor.name, visitor.name, visitor.publish_port
+    );
+
+    // 等待服务器确认（1 字节：1=成功，0=失败）
+    let mut confirm = [0u8; 1];
+    server_stream_tokio.read_exact(&mut confirm).await?;
+
+    if confirm[0] != 1 {
+        // 读取错误消息
+        let error_msg = match read_error_message(&mut server_stream_tokio).await {
+            Ok(msg) => msg,
+            Err(_) => "Unknown error".to_string(),
+        };
+        error!(
+            "Visitor '{}': Server rejected connection: {}",
+            visitor.name, error_msg
+        );
+        return Err(anyhow::anyhow!(
+            "Server rejected visitor connection: {}",
+            error_msg
+        ));
+    }
+
+    info!(
+        "Visitor '{}': Server accepted connection, starting data transfer",
+        visitor.name
+    );
+
+    // 双向转发数据
+    let (mut local_read, mut local_write) = local_stream.split();
+    let (mut server_read, mut server_write) = tokio::io::split(server_stream_tokio);
+
+    let client_to_server = async {
+        tokio::io::copy(&mut local_read, &mut server_write).await?;
+        server_write.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    let server_to_client = async {
+        tokio::io::copy(&mut server_read, &mut local_write).await?;
+        local_write.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    tokio::select! {
+        result = client_to_server => {
+            if let Err(e) = result {
+                warn!("Visitor '{}': Client to server copy error: {}", visitor.name, e);
+            }
+        }
+        result = server_to_client => {
+            if let Err(e) = result {
+                warn!("Visitor '{}': Server to client copy error: {}", visitor.name, e);
+            }
+        }
+    }
+
+    info!("Visitor '{}': Connection closed", visitor.name);
+    Ok(())
 }
