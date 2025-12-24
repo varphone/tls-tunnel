@@ -19,16 +19,23 @@ use tracing::info;
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // 初始化日志
+    // Initialize logging based on verbosity level
+    let log_level = match cli.verbose {
+        0 => "warn",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    };
+
     tracing_subscriber::fmt()
-        .with_env_filter(&cli.log_level)
+        .with_env_filter(log_level)
         .with_target(false)
         .with_thread_ids(false)
         .with_file(false)
         .with_line_number(false)
         .init();
 
-    // 显示版本信息
+    // Display version information
     info!("TLS Tunnel v{}", env!("CARGO_PKG_VERSION"));
 
     match &cli.command {

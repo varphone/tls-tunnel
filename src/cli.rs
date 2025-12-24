@@ -7,9 +7,9 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// 日志级别 (trace, debug, info, warn, error)
-    #[arg(short, long, default_value = "info", global = true)]
-    pub log_level: String,
+    /// Increase logging verbosity (can be used multiple times: -v, -vv, -vvv, -vvvv)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
 }
 
 #[derive(Subcommand, Debug)]
