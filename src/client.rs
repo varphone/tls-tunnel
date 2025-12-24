@@ -259,18 +259,8 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
 
     // Handle stream requests from server
     use futures::future::poll_fn;
-    tracing::debug!("Entering yamux loop");
     loop {
-        tracing::trace!("Polling for next inbound stream");
         let stream_result = poll_fn(|cx| yamux_conn.poll_next_inbound(cx)).await;
-        tracing::trace!(
-            "poll_next_inbound returned: {:?}",
-            match &stream_result {
-                Some(Ok(_)) => "Some(Ok(stream))",
-                Some(Err(_e)) => "Some(Err)",
-                None => "None",
-            }
-        );
 
         match stream_result {
             Some(Ok(stream)) => {
@@ -296,7 +286,6 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
         }
     }
 
-    tracing::debug!("Exited yamux loop");
     info!("Client disconnected");
     Ok(())
 }
