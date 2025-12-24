@@ -16,6 +16,22 @@
 - 🔁 **自动重连**（客户端断线后自动重连，本地服务连接失败自动重试）
 - ✅ **配置验证**（客户端和服务器端双重验证，防止配置冲突）
 - 📋 **错误反馈**（服务器拒绝连接时返回详细错误信息）
+- 🌐 **多传输协议**（支持 TLS、HTTP/2、WebSocket）
+- 🔧 **反向代理支持**（支持在 Nginx 等代理服务器后端运行）
+
+## 传输协议
+
+tls-tunnel 支持三种传输协议：
+
+1. **TLS**（默认）：原生 TLS over TCP，性能最佳
+2. **HTTP/2**：使用 HTTP/2 CONNECT 方法，可穿透 HTTP 代理
+3. **WebSocket**：使用 WebSocket Secure (WSS)，最大兼容性
+
+详细对比和使用指南：
+- [HTTP/2 传输使用指南](HTTP2_USAGE.md)
+- [WebSocket 传输使用指南](WSS_USAGE.md)
+- [传输协议对比](TRANSPORT_COMPARISON.md)
+- [反向代理配置指南](REVERSE_PROXY.md)
 
 ## 架构设计
 

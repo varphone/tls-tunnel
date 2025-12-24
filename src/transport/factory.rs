@@ -23,11 +23,13 @@ pub fn create_transport_client(
         TransportType::Http2 => Arc::new(Http2TransportClient::new(
             config.server_addr.clone(),
             config.server_port,
+            config.server_path.clone(),
             connector,
         )),
         TransportType::Wss => Arc::new(WssTransportClient::new(
             config.server_addr.clone(),
             config.server_port,
+            config.server_path.clone(),
             connector,
         )),
     };
@@ -42,13 +44,10 @@ pub async fn create_transport_server(
 ) -> Result<Arc<dyn TransportServer>> {
     let server: Arc<dyn TransportServer> = match config.transport {
         TransportType::Tls => {
-            let server = TlsTransportServer::bind(
-                config.bind_addr.clone(),
-                config.bind_port,
-                acceptor,
-            )
-            .await
-            .context("Failed to bind TLS transport server")?;
+            let server =
+                TlsTransportServer::bind(config.bind_addr.clone(), config.bind_port, acceptor)
+                    .await
+                    .context("Failed to bind TLS transport server")?;
             Arc::new(server)
         }
         TransportType::Http2 => {
@@ -56,6 +55,7 @@ pub async fn create_transport_server(
                 config.bind_addr.clone(),
                 config.bind_port,
                 acceptor,
+                config.behind_proxy,
             )
             .await
             .context("Failed to bind HTTP/2 transport server")?;
@@ -66,6 +66,7 @@ pub async fn create_transport_server(
                 config.bind_addr.clone(),
                 config.bind_port,
                 acceptor,
+                config.behind_proxy,
             )
             .await
             .context("Failed to bind WebSocket transport server")?;

@@ -8,7 +8,17 @@ use std::sync::Arc;
 use tokio_rustls::rustls;
 
 /// 加载服务器 TLS 配置
+#[allow(dead_code)]
 pub fn load_server_config(cert_path: &Path, key_path: &Path) -> Result<Arc<rustls::ServerConfig>> {
+    load_server_config_with_alpn(cert_path, key_path, None)
+}
+
+/// 加载服务器 TLS 配置，支持ALPN
+pub fn load_server_config_with_alpn(
+    cert_path: &Path,
+    key_path: &Path,
+    alpn_protocols: Option<Vec<Vec<u8>>>,
+) -> Result<Arc<rustls::ServerConfig>> {
     // 加载证书
     let cert_file = File::open(cert_path)
         .with_context(|| format!("Failed to open cert file: {:?}", cert_path))?;
@@ -27,18 +37,33 @@ pub fn load_server_config(cert_path: &Path, key_path: &Path) -> Result<Arc<rustl
         .context("No private key found")?;
 
     // 创建 TLS 配置
-    let config = rustls::ServerConfig::builder()
+    let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .context("Failed to create server config")?;
+
+    // 设置 ALPN 协议
+    if let Some(protocols) = alpn_protocols {
+        config.alpn_protocols = protocols;
+    }
 
     Ok(Arc::new(config))
 }
 
 /// 加载客户端 TLS 配置
+#[allow(dead_code)]
 pub fn load_client_config(
     ca_cert_path: Option<&Path>,
     skip_verify: bool,
+) -> Result<Arc<rustls::ClientConfig>> {
+    load_client_config_with_alpn(ca_cert_path, skip_verify, None)
+}
+
+/// 加载客户端 TLS 配置，支持ALPN
+pub fn load_client_config_with_alpn(
+    ca_cert_path: Option<&Path>,
+    skip_verify: bool,
+    alpn_protocols: Option<Vec<Vec<u8>>>,
 ) -> Result<Arc<rustls::ClientConfig>> {
     let mut root_store = rustls::RootCertStore::empty();
 
@@ -73,6 +98,11 @@ pub fn load_client_config(
         config
             .dangerous()
             .set_certificate_verifier(Arc::new(NoCertificateVerification));
+    }
+
+    // 设置 ALPN 协议
+    if let Some(protocols) = alpn_protocols {
+        config.alpn_protocols = protocols;
     }
 
     Ok(Arc::new(config))

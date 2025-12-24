@@ -1,7 +1,7 @@
+mod factory;
 mod http2;
 mod tls;
 mod wss;
-mod factory;
 
 pub use factory::{create_transport_client, create_transport_server};
 pub use http2::{Http2TransportClient, Http2TransportServer};
@@ -11,8 +11,8 @@ pub use wss::{WssTransportClient, WssTransportServer};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite};
 use std::pin::Pin;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// 传输层类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ impl std::str::FromStr for TransportType {
 }
 
 /// 传输层连接抽象
-/// 
+///
 /// 统一封装不同传输方式（TLS、HTTP/2、WebSocket）的连接
 pub trait Transport: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 
@@ -69,7 +69,7 @@ impl<T> Transport for T where T: AsyncRead + AsyncWrite + Unpin + Send + 'static
 pub trait TransportClient: Send + Sync {
     /// 连接到服务器并返回传输层连接
     async fn connect(&self) -> Result<Pin<Box<dyn Transport>>>;
-    
+
     /// 获取传输类型
     fn transport_type(&self) -> TransportType;
 }
@@ -79,7 +79,7 @@ pub trait TransportClient: Send + Sync {
 pub trait TransportServer: Send + Sync {
     /// 接受新的传输层连接
     async fn accept(&self) -> Result<Pin<Box<dyn Transport>>>;
-    
+
     /// 获取传输类型
     fn transport_type(&self) -> TransportType;
 }

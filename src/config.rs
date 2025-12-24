@@ -1,7 +1,7 @@
+use crate::transport::TransportType;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use crate::transport::TransportType;
 
 /// 代理类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +70,10 @@ pub struct ServerConfig {
     /// 传输类型（tls, http2, wss）
     #[serde(default)]
     pub transport: TransportType,
+    /// 是否运行在反向代理后（如 Nginx）
+    /// 当为 true 时，HTTP/2 和 WebSocket 将使用非 TLS 模式
+    #[serde(default)]
+    pub behind_proxy: bool,
     /// TLS 证书路径
     #[serde(default)]
     pub cert_path: Option<PathBuf>,
@@ -87,6 +91,9 @@ pub struct ClientConfig {
     pub server_addr: String,
     /// 服务器端口
     pub server_port: u16,
+    /// 服务器路径（用于反向代理子目录，默认为 "/"）
+    #[serde(default = "default_server_path")]
+    pub server_path: String,
     /// 传输类型（tls, http2, wss）
     #[serde(default)]
     pub transport: TransportType,
@@ -97,6 +104,10 @@ pub struct ClientConfig {
     pub ca_cert_path: Option<PathBuf>,
     /// 认证密钥（用于服务器认证）
     pub auth_key: String,
+}
+
+fn default_server_path() -> String {
+    "/".to_string()
 }
 
 /// 客户端完整配置（包含代理列表）
@@ -111,10 +122,23 @@ pub struct ClientFullConfig {
 impl ServerConfig {
     /// 确保证书路径配置成对出现或同时缺省
     pub fn validate(&self) -> anyhow::Result<()> {
+        // 验证证书配置
         match (&self.cert_path, &self.key_path) {
-            (Some(_), Some(_)) | (None, None) => Ok(()),
+            (Some(_), Some(_)) | (None, None) => {}
             _ => bail!("cert_path and key_path must both be set, or both omitted to auto-generate"),
         }
+
+        // 当在反向代理后运行时，只有 HTTP/2 和 WebSocket 支持
+        if self.behind_proxy && self.transport == TransportType::Tls {
+            bail!("TLS transport cannot run behind a proxy. Use http2 or wss transport instead.");
+        }
+
+        // 当在反向代理后运行时，不需要证书
+        if self.behind_proxy && (self.cert_path.is_some() || self.key_path.is_some()) {
+            bail!("Certificates are not needed when running behind a proxy (TLS is terminated by the proxy).");
+        }
+
+        Ok(())
     }
 }
 

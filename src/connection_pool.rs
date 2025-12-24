@@ -140,7 +140,10 @@ impl AddressPool {
 
         // 如果配置不允许复用，直接丢弃
         if !self.config.reuse_connections {
-            debug!("Connection reuse disabled, discarding connection to {}", self.address);
+            debug!(
+                "Connection reuse disabled, discarding connection to {}",
+                self.address
+            );
             return;
         }
 
@@ -281,7 +284,7 @@ fn is_connection_healthy(stream: &TcpStream) -> bool {
             // 但如果有数据，连接仍然是活的
             warn!("Unexpected data in idle connection");
             true
-        },
+        }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true, // 无数据，连接正常
         Err(e) => {
             // 其他错误，连接不健康
@@ -364,6 +367,7 @@ impl ConnectionPool {
     }
 
     /// 预热多个地址的连接池
+    #[allow(dead_code)]
     pub async fn warmup_all(&self, addresses: &[String]) -> Result<()> {
         for address in addresses {
             if let Err(e) = self.warmup(address).await {

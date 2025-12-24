@@ -30,24 +30,25 @@ impl TransportClient for TlsTransportClient {
     async fn connect(&self) -> Result<Pin<Box<dyn Transport>>> {
         let addr = format!("{}:{}", self.server_addr, self.server_port);
         info!("Connecting to {} via TLS", addr);
-        
+
         let tcp_stream = TcpStream::connect(&addr)
             .await
             .with_context(|| format!("Failed to connect to {}", addr))?;
-        
+
         let server_name = ServerName::try_from(self.server_addr.clone())
             .context("Invalid server name")?
             .to_owned();
-        
-        let tls_stream = self.connector
+
+        let tls_stream = self
+            .connector
             .connect(server_name, tcp_stream)
             .await
             .context("TLS handshake failed")?;
-        
+
         info!("TLS connection established to {}", addr);
         Ok(Box::pin(tls_stream))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::Tls
     }
@@ -65,9 +66,9 @@ impl TlsTransportServer {
         let listener = TcpListener::bind(&addr)
             .await
             .with_context(|| format!("Failed to bind to {}", addr))?;
-        
+
         info!("TLS transport server listening on {}", addr);
-        
+
         Ok(Self {
             listener: Arc::new(listener),
             acceptor,
@@ -78,22 +79,24 @@ impl TlsTransportServer {
 #[async_trait]
 impl TransportServer for TlsTransportServer {
     async fn accept(&self) -> Result<Pin<Box<dyn Transport>>> {
-        let (tcp_stream, peer_addr) = self.listener
+        let (tcp_stream, peer_addr) = self
+            .listener
             .accept()
             .await
             .context("Failed to accept TCP connection")?;
-        
+
         info!("Accepted TCP connection from {}", peer_addr);
-        
-        let tls_stream = self.acceptor
+
+        let tls_stream = self
+            .acceptor
             .accept(tcp_stream)
             .await
             .context("TLS handshake failed")?;
-        
+
         info!("TLS handshake completed with {}", peer_addr);
         Ok(Box::pin(tls_stream))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::Tls
     }

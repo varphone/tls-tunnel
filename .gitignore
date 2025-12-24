@@ -1,4 +1,5 @@
 /target
+/examples/*.conf
 /examples/*.toml
 /examples/certs/*.pem
 /examples/certs/*.key

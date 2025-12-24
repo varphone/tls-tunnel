@@ -15,6 +15,52 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
 
+/// 服务器端流类型枚举，用于统一处理 TLS 和 plain TCP
+enum ServerStreamType {
+    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+    Plain(TcpStream),
+}
+
+impl AsyncRead for ServerStreamType {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ServerStreamType::Tls(s) => Pin::new(s).poll_read(cx, buf),
+            ServerStreamType::Plain(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ServerStreamType {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            ServerStreamType::Tls(s) => Pin::new(s).poll_write(cx, buf),
+            ServerStreamType::Plain(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ServerStreamType::Tls(s) => Pin::new(s).poll_flush(cx),
+            ServerStreamType::Plain(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ServerStreamType::Tls(s) => Pin::new(s).poll_shutdown(cx),
+            ServerStreamType::Plain(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
 /// WebSocket 流包装器，实现 AsyncRead + AsyncWrite
 pub struct WssStream<S>
 where
@@ -92,9 +138,7 @@ where
                     Poll::Pending
                 }
             },
-            Poll::Ready(Some(Err(e))) => {
-                Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
-            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
             Poll::Ready(None) => {
                 // 流结束
                 Poll::Ready(Ok(()))
@@ -117,15 +161,11 @@ where
         let msg = Message::Binary(buf.to_vec());
 
         match self.ws_stream.poll_ready_unpin(cx) {
-            Poll::Ready(Ok(())) => {
-                match self.ws_stream.start_send_unpin(msg) {
-                    Ok(()) => Poll::Ready(Ok(buf.len())),
-                    Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
-                }
-            }
-            Poll::Ready(Err(e)) => {
-                Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
-            }
+            Poll::Ready(Ok(())) => match self.ws_stream.start_send_unpin(msg) {
+                Ok(()) => Poll::Ready(Ok(buf.len())),
+                Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            },
+            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -150,14 +190,21 @@ where
 pub struct WssTransportClient {
     server_addr: String,
     server_port: u16,
+    server_path: String,
     connector: TlsConnector,
 }
 
 impl WssTransportClient {
-    pub fn new(server_addr: String, server_port: u16, connector: TlsConnector) -> Self {
+    pub fn new(
+        server_addr: String,
+        server_port: u16,
+        server_path: String,
+        connector: TlsConnector,
+    ) -> Self {
         Self {
             server_addr,
             server_port,
+            server_path,
             connector,
         }
     }
@@ -183,7 +230,9 @@ impl TransportClient for WssTransportClient {
             .context("TLS handshake failed")?;
 
         // 3. WebSocket 握手
-        let ws_url = format!("wss://{}/", self.server_addr);
+        // 注意：使用 ws://localhost 作为 URL，因为 TLS 已经建立
+        // 实际路径通过 server_path 指定
+        let ws_url = format!("ws://localhost{}", self.server_path);
         let (ws_stream, _response) = tokio_tungstenite::client_async(ws_url, tls_stream)
             .await
             .context("WebSocket handshake failed")?;
@@ -199,16 +248,24 @@ impl TransportClient for WssTransportClient {
 
 pub struct WssTransportServer {
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    acceptor: Option<TlsAcceptor>,
 }
 
 impl WssTransportServer {
-    pub async fn bind(bind_addr: String, bind_port: u16, acceptor: TlsAcceptor) -> Result<Self> {
+    pub async fn bind(
+        bind_addr: String,
+        bind_port: u16,
+        acceptor: TlsAcceptor,
+        behind_proxy: bool,
+    ) -> Result<Self> {
         let listener = TcpListener::bind((bind_addr.as_str(), bind_port))
             .await
             .context("Failed to bind WebSocket server")?;
 
-        Ok(Self { listener, acceptor })
+        Ok(Self {
+            listener,
+            acceptor: if behind_proxy { None } else { Some(acceptor) },
+        })
     }
 }
 
@@ -222,15 +279,21 @@ impl TransportServer for WssTransportServer {
             .await
             .context("Failed to accept TCP")?;
 
-        // 2. TLS 握手
-        let tls_stream = self
-            .acceptor
-            .accept(tcp_stream)
-            .await
-            .context("TLS handshake failed")?;
+        // 2. 创建统一的流类型
+        let stream = if let Some(ref acceptor) = self.acceptor {
+            // 标准 TLS 模式
+            let tls_stream = acceptor
+                .accept(tcp_stream)
+                .await
+                .context("TLS handshake failed")?;
+            ServerStreamType::Tls(tls_stream)
+        } else {
+            // 反向代理模式 - 直接使用 TCP（TLS 由前端代理处理）
+            ServerStreamType::Plain(tcp_stream)
+        };
 
         // 3. WebSocket 握手
-        let ws_stream = tokio_tungstenite::accept_async(tls_stream)
+        let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
             .context("WebSocket handshake failed")?;
 

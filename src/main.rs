@@ -78,7 +78,16 @@ async fn main() -> Result<()> {
 
             // 加载 TLS 配置
             let (cert_path, key_path) = ensure_server_certs(&server_config)?;
-            let tls_config = tls::load_server_config(&cert_path, &key_path)?;
+
+            // 根据传输类型设置 ALPN
+            let alpn_protocols = if server_config.transport == transport::TransportType::Http2 {
+                Some(vec![b"h2".to_vec()])
+            } else {
+                None
+            };
+
+            let tls_config =
+                tls::load_server_config_with_alpn(&cert_path, &key_path, alpn_protocols)?;
             let acceptor = TlsAcceptor::from(tls_config);
 
             // 运行服务器
@@ -89,9 +98,18 @@ async fn main() -> Result<()> {
             let client_config = AppConfig::load_client_config(config)?;
 
             // 加载 TLS 配置
-            let tls_config = tls::load_client_config(
+            // 根据传输类型设置 ALPN
+            let alpn_protocols =
+                if client_config.client.transport == transport::TransportType::Http2 {
+                    Some(vec![b"h2".to_vec()])
+                } else {
+                    None
+                };
+
+            let tls_config = tls::load_client_config_with_alpn(
                 client_config.client.ca_cert_path.as_deref(),
                 client_config.client.skip_verify,
+                alpn_protocols,
             )?;
             let connector = TlsConnector::from(tls_config);
 

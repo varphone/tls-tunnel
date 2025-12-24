@@ -114,7 +114,9 @@ pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Resu
 
     info!(
         "Server listening on {}:{} (transport: {})",
-        config.bind_addr, config.bind_port, transport_server.transport_type()
+        config.bind_addr,
+        config.bind_port,
+        transport_server.transport_type()
     );
     info!("Waiting for client connections... (Press Ctrl+C to stop)");
 
@@ -400,9 +402,7 @@ async fn handle_client(
     Ok(())
 }
 
-async fn read_proxy_configs<S>(
-    tls_stream: &mut S,
-) -> Result<Vec<ProxyInfo>>
+async fn read_proxy_configs<S>(tls_stream: &mut S) -> Result<Vec<ProxyInfo>>
 where
     S: AsyncReadExt + Unpin,
 {

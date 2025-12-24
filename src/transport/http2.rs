@@ -13,6 +13,53 @@ use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tracing;
+
+/// 服务器端流类型枚举，用于统一处理 TLS 和 plain TCP
+enum ServerStreamType {
+    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+    Plain(TcpStream),
+}
+
+impl AsyncRead for ServerStreamType {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ServerStreamType::Tls(s) => Pin::new(s).poll_read(cx, buf),
+            ServerStreamType::Plain(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ServerStreamType {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            ServerStreamType::Tls(s) => Pin::new(s).poll_write(cx, buf),
+            ServerStreamType::Plain(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ServerStreamType::Tls(s) => Pin::new(s).poll_flush(cx),
+            ServerStreamType::Plain(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ServerStreamType::Tls(s) => Pin::new(s).poll_shutdown(cx),
+            ServerStreamType::Plain(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
 
 /// HTTP/2 流包装器，实现 AsyncRead + AsyncWrite
 pub struct Http2Stream {
@@ -43,7 +90,7 @@ impl AsyncRead for Http2Stream {
                 let to_read = std::cmp::min(data.len(), buf.remaining());
                 buf.put_slice(&data[..to_read]);
                 data.advance(to_read);
-                
+
                 if data.is_empty() {
                     self.read_buf = None;
                 }
@@ -56,22 +103,20 @@ impl AsyncRead for Http2Stream {
             Poll::Ready(Some(Ok(data))) => {
                 let to_read = std::cmp::min(data.len(), buf.remaining());
                 buf.put_slice(&data[..to_read]);
-                
+
                 // 如果还有剩余数据，保存到缓冲区
                 if to_read < data.len() {
                     let mut remaining = data;
                     remaining.advance(to_read);
                     self.read_buf = Some(remaining);
                 }
-                
+
                 // 释放流量控制窗口
                 let _ = self.recv_stream.flow_control().release_capacity(to_read);
-                
+
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Some(Err(e))) => {
-                Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
-            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
             Poll::Ready(None) => {
                 // 流结束
                 Poll::Ready(Ok(()))
@@ -89,21 +134,19 @@ impl AsyncWrite for Http2Stream {
     ) -> Poll<io::Result<usize>> {
         // 检查发送流是否有足够的容量
         self.send_stream.reserve_capacity(buf.len());
-        
+
         match self.send_stream.poll_capacity(cx) {
             Poll::Ready(Some(Ok(available))) => {
                 let to_write = std::cmp::min(available, buf.len());
                 let data = Bytes::copy_from_slice(&buf[..to_write]);
-                
+
                 self.send_stream
                     .send_data(data, false)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                
+
                 Poll::Ready(Ok(to_write))
             }
-            Poll::Ready(Some(Err(e))) => {
-                Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
-            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
             Poll::Ready(None) => {
                 // 流已关闭
                 Poll::Ready(Err(io::Error::new(
@@ -132,14 +175,22 @@ impl AsyncWrite for Http2Stream {
 pub struct Http2TransportClient {
     server_addr: String,
     server_port: u16,
+    #[allow(dead_code)]
+    server_path: String,
     connector: TlsConnector,
 }
 
 impl Http2TransportClient {
-    pub fn new(server_addr: String, server_port: u16, connector: TlsConnector) -> Self {
+    pub fn new(
+        server_addr: String,
+        server_port: u16,
+        server_path: String,
+        connector: TlsConnector,
+    ) -> Self {
         Self {
             server_addr,
             server_port,
+            server_path,
             connector,
         }
     }
@@ -149,57 +200,95 @@ impl Http2TransportClient {
 impl TransportClient for Http2TransportClient {
     async fn connect(&self) -> Result<Pin<Box<dyn Transport>>> {
         // 1. 建立 TCP + TLS 连接
+        tracing::debug!(
+            "HTTP/2 client: Connecting to {}:{}",
+            self.server_addr,
+            self.server_port
+        );
         let tcp = TcpStream::connect((&self.server_addr as &str, self.server_port))
             .await
             .context("Failed to connect to server")?;
-        
+        tracing::debug!("HTTP/2 client: TCP connected");
+
         let domain = ServerName::try_from(self.server_addr.clone())
             .map_err(|_| anyhow::anyhow!("Invalid DNS name"))?
             .to_owned();
-        
+
         let tls_stream = self
             .connector
             .connect(domain, tcp)
             .await
             .context("TLS handshake failed")?;
 
+        // 检查 ALPN 协商结果
+        let (_, tls_conn) = tls_stream.get_ref();
+        tracing::debug!(
+            "HTTP/2 client: TLS handshake completed, ALPN: {:?}",
+            tls_conn.alpn_protocol()
+        );
+
         // 2. 建立 HTTP/2 连接
-        let (mut send_request, connection) = h2::client::handshake(tls_stream)
+        let (send_request, connection) = h2::client::handshake(tls_stream)
             .await
             .context("HTTP/2 handshake failed")?;
+        tracing::debug!("HTTP/2 client: HTTP/2 handshake completed");
 
-        // 在后台运行 HTTP/2 连接
+        // 在后台运行 HTTP/2 连接 driver
+        // 这是必须的，因为connection需要被持续poll才能处理帧
         tokio::spawn(async move {
+            tracing::debug!("HTTP/2 client: Connection driver started");
             if let Err(e) = connection.await {
-                eprintln!("HTTP/2 connection error: {:?}", e);
+                tracing::error!("HTTP/2 connection error: {:?}", e);
+            } else {
+                tracing::debug!("HTTP/2 client: Connection closed normally");
             }
         });
 
+        //给 driver 一点时间启动
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         // 3. 发送 CONNECT 请求建立隧道
+        // 注意：CONNECT 请求的 URI 应该是目标地址（authority），不是路径
+        tracing::debug!("HTTP/2 client: Sending CONNECT request");
         let request = http::Request::builder()
             .method(http::Method::CONNECT)
-            .uri("/")
-            .header(http::header::HOST, self.server_addr.as_str())
+            .uri(&self.server_addr) // CONNECT 使用 authority，不是路径
+            .version(http::Version::HTTP_2)
             .body(())
             .context("Failed to build CONNECT request")?;
 
+        // 等待发送器准备好
+        let mut send_request = send_request
+            .ready()
+            .await
+            .context("send_request ready() failed")?;
+
+        // false 表示这不是最后一个帧，还有数据要发送
         let (response_fut, send_stream) = send_request
             .send_request(request, false)
             .context("Failed to send CONNECT request")?;
+        tracing::debug!("HTTP/2 client: CONNECT request sent, waiting for response");
 
         // 等待服务器响应
-        let response = response_fut.await.context("Failed to receive CONNECT response")?;
-        
+        let response = response_fut
+            .await
+            .context("Failed to receive CONNECT response")?;
+        tracing::debug!(
+            "HTTP/2 client: Received response with status: {}",
+            response.status()
+        );
+
         if response.status() != http::StatusCode::OK {
             anyhow::bail!("CONNECT failed with status: {}", response.status());
         }
 
         let recv_stream = response.into_body();
 
-        // 4. 返回包装的 HTTP/2 流
+        // 4. 返回包装的 HTTP/2 流，现在可以用于双向通信
+        tracing::debug!("HTTP/2 client: Connection established successfully");
         Ok(Box::pin(Http2Stream::new(send_stream, recv_stream)))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::Http2
     }
@@ -207,16 +296,24 @@ impl TransportClient for Http2TransportClient {
 
 pub struct Http2TransportServer {
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    acceptor: Option<TlsAcceptor>,
 }
 
 impl Http2TransportServer {
-    pub async fn bind(bind_addr: String, bind_port: u16, acceptor: TlsAcceptor) -> Result<Self> {
+    pub async fn bind(
+        bind_addr: String,
+        bind_port: u16,
+        acceptor: TlsAcceptor,
+        behind_proxy: bool,
+    ) -> Result<Self> {
         let listener = TcpListener::bind((bind_addr.as_str(), bind_port))
             .await
             .context("Failed to bind HTTP/2 server")?;
-        
-        Ok(Self { listener, acceptor })
+
+        Ok(Self {
+            listener,
+            acceptor: if behind_proxy { None } else { Some(acceptor) },
+        })
     }
 }
 
@@ -224,63 +321,106 @@ impl Http2TransportServer {
 impl TransportServer for Http2TransportServer {
     async fn accept(&self) -> Result<Pin<Box<dyn Transport>>> {
         // 1. 接受 TCP 连接
-        let (tcp_stream, _) = self.listener.accept().await.context("Failed to accept TCP")?;
-
-        // 2. TLS 握手
-        let tls_stream = self
-            .acceptor
-            .accept(tcp_stream)
+        tracing::debug!("HTTP/2 server: Waiting for TCP connection");
+        let (tcp_stream, peer_addr) = self
+            .listener
+            .accept()
             .await
-            .context("TLS handshake failed")?;
+            .context("Failed to accept TCP")?;
+        tracing::debug!("HTTP/2 server: Accepted TCP connection from {}", peer_addr);
 
-        // 3. HTTP/2 握手
-        let mut connection = h2::server::handshake(tls_stream)
-            .await
-            .context("HTTP/2 handshake failed")?;
-
-        // 4. 接受第一个 HTTP/2 流（应该是 CONNECT 请求）
-        let (request, mut stream) = match connection.accept().await {
-            Some(Ok(stream)) => stream,
-            Some(Err(e)) => return Err(e).context("Failed to accept HTTP/2 stream"),
-            None => anyhow::bail!("Connection closed before receiving request"),
+        // 2. 创建统一的流类型
+        let stream = if let Some(ref acceptor) = self.acceptor {
+            // 标准 TLS 模式
+            tracing::debug!("HTTP/2 server: Starting TLS handshake");
+            let tls_stream = acceptor
+                .accept(tcp_stream)
+                .await
+                .context("TLS handshake failed")?;
+            tracing::debug!("HTTP/2 server: TLS handshake completed");
+            ServerStreamType::Tls(tls_stream)
+        } else {
+            // 反向代理模式 - 直接使用 TCP（TLS 由前端代理处理）
+            tracing::debug!("HTTP/2 server: Using plain TCP (behind proxy)");
+            ServerStreamType::Plain(tcp_stream)
         };
 
-        // 在后台继续处理其他可能的流
+        // 3. HTTP/2 握手
+        tracing::debug!("HTTP/2 server: Starting HTTP/2 handshake");
+        let mut connection = h2::server::handshake(stream)
+            .await
+            .context("HTTP/2 handshake failed")?;
+        tracing::debug!("HTTP/2 server: HTTP/2 handshake completed");
+
+        // 4. 接受第一个 HTTP/2 流（应该是 CONNECT 请求）
+        // 直接在主流程中 accept，因为 accept 本身会驱动 connection
+        tracing::debug!("HTTP/2 server: Waiting for first HTTP/2 stream");
+
+        let (request, mut response_stream) = match connection.accept().await {
+            Some(Ok(stream)) => {
+                tracing::debug!("HTTP/2 server: Received first stream");
+                stream
+            }
+            Some(Err(e)) => {
+                tracing::error!("HTTP/2 server: Failed to accept stream: {:?}", e);
+                return Err(e).context("Failed to accept HTTP/2 stream");
+            }
+            None => {
+                tracing::error!("HTTP/2 server: Connection closed before receiving request");
+                anyhow::bail!("Connection closed before receiving request");
+            }
+        };
+
+        // 在后台继续运行 HTTP/2 连接处理
+        // 注意：对于 tls-tunnel，我们只使用第一个 stream
         tokio::spawn(async move {
+            tracing::debug!("HTTP/2 server: Connection driver started");
             while let Some(result) = connection.accept().await {
                 if let Err(e) = result {
-                    eprintln!("HTTP/2 accept error: {:?}", e);
+                    tracing::error!("HTTP/2 server: Accept error: {:?}", e);
                     break;
                 }
+                tracing::debug!("HTTP/2 server: Accepted additional stream (will be ignored)");
             }
+            tracing::debug!("HTTP/2 server: Connection driver stopped");
         });
 
         // 5. 验证是 CONNECT 请求
+        tracing::debug!(
+            "HTTP/2 server: Request method: {}, URI: {}",
+            request.method(),
+            request.uri()
+        );
         if request.method() != http::Method::CONNECT {
+            tracing::error!("HTTP/2 server: Expected CONNECT, got {}", request.method());
             let response = http::Response::builder()
                 .status(http::StatusCode::METHOD_NOT_ALLOWED)
                 .body(())
                 .unwrap();
-            stream.send_response(response, true)?;
+            response_stream.send_response(response, true)?;
             anyhow::bail!("Expected CONNECT method, got {}", request.method());
         }
 
-        // 6. 发送 200 OK 响应
+        // 6. 发送 200 OK 响应，表示建立隧道
+        tracing::debug!("HTTP/2 server: Sending 200 OK response");
         let response = http::Response::builder()
             .status(http::StatusCode::OK)
             .body(())
             .context("Failed to build response")?;
-        
-        let send_stream = stream
+
+        // false 表示连接保持打开，用于后续数据传输
+        let send_stream = response_stream
             .send_response(response, false)
             .context("Failed to send response")?;
+        tracing::debug!("HTTP/2 server: Response sent");
 
         let recv_stream = request.into_body();
 
-        // 7. 返回包装的 HTTP/2 流
+        // 7. 返回包装的 HTTP/2 流，用于双向通信
+        tracing::debug!("HTTP/2 server: Connection established successfully");
         Ok(Box::pin(Http2Stream::new(send_stream, recv_stream)))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::Http2
     }

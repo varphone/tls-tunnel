@@ -103,7 +103,10 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     let transport_client = create_transport_client(client_config, tls_connector)
         .context("Failed to create transport client")?;
 
-    info!("Using transport type: {}", transport_client.transport_type());
+    info!(
+        "Using transport type: {}",
+        transport_client.transport_type()
+    );
 
     // 通过传输层连接到服务器
     let transport_stream = transport_client
@@ -207,26 +210,31 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     };
 
     // 为每个代理创建独立的连接池配置
-    let proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>> = Arc::new(config
-        .proxies
-        .iter()
-        .map(|proxy| {
-            let mut pool_cfg = pool_config.clone();
-            pool_cfg.reuse_connections = proxy.proxy_type.should_reuse_connections();
-            
-            // HTTP/2.0 需要单连接多路复用，调整池大小
-            if proxy.proxy_type.is_multiplexed() {
-                pool_cfg.max_size = 1;
-                pool_cfg.min_idle = 1;
-            }
-            
-            let pool = Arc::new(ConnectionPool::new(pool_cfg));
-            (proxy.local_port, pool)
-        })
-        .collect());
+    let proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>> = Arc::new(
+        config
+            .proxies
+            .iter()
+            .map(|proxy| {
+                let mut pool_cfg = pool_config.clone();
+                pool_cfg.reuse_connections = proxy.proxy_type.should_reuse_connections();
+
+                // HTTP/2.0 需要单连接多路复用，调整池大小
+                if proxy.proxy_type.is_multiplexed() {
+                    pool_cfg.max_size = 1;
+                    pool_cfg.min_idle = 1;
+                }
+
+                let pool = Arc::new(ConnectionPool::new(pool_cfg));
+                (proxy.local_port, pool)
+            })
+            .collect(),
+    );
 
     // 预热连接池
-    info!("Warming up connection pools for {} proxies...", config.proxies.len());
+    info!(
+        "Warming up connection pools for {} proxies...",
+        config.proxies.len()
+    );
     for proxy in &config.proxies {
         let local_addr = format!("127.0.0.1:{}", proxy.local_port);
         if let Some(pool) = proxy_pools.get(&proxy.local_port) {
@@ -251,8 +259,18 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
 
     // 处理来自服务器的流请求
     use futures::future::poll_fn;
+    eprintln!("CLIENT: Entering yamux loop");
     loop {
+        eprintln!("CLIENT: Polling for next inbound stream...");
         let stream_result = poll_fn(|cx| yamux_conn.poll_next_inbound(cx)).await;
+        eprintln!(
+            "CLIENT: poll_next_inbound returned: {:?}",
+            match &stream_result {
+                Some(Ok(_)) => "Some(Ok(stream))",
+                Some(Err(_e)) => "Some(Err)",
+                None => "None",
+            }
+        );
 
         match stream_result {
             Some(Ok(stream)) => {
@@ -268,24 +286,24 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
                 });
             }
             Some(Err(e)) => {
+                eprintln!("CLIENT: Yamux error: {}", e);
                 error!("Yamux error: {}", e);
                 break;
             }
             None => {
+                eprintln!("CLIENT: Yamux connection closed by server");
                 info!("Yamux connection closed by server");
                 break;
             }
         }
     }
 
+    eprintln!("CLIENT: Exited yamux loop");
     info!("Client disconnected");
     Ok(())
 }
 
-async fn send_proxies_json<S>(
-    config: &ClientFullConfig,
-    tls_stream: &mut S,
-) -> Result<()>
+async fn send_proxies_json<S>(config: &ClientFullConfig, tls_stream: &mut S) -> Result<()>
 where
     S: AsyncWriteExt + Unpin,
 {
@@ -331,9 +349,10 @@ async fn handle_stream(
         .ok_or_else(|| anyhow::anyhow!("No proxy config found for port {}", target_port))?;
 
     info!("Found proxy '{}' for port {}", proxy.name, target_port);
-    
+
     // 获取该端口对应的连接池
-    let pool = proxy_pools.get(&target_port)
+    let pool = proxy_pools
+        .get(&target_port)
         .ok_or_else(|| anyhow::anyhow!("No connection pool found for port {}", target_port))?
         .clone();
 
@@ -366,7 +385,8 @@ async fn handle_stream(
                     // 根据代理类型决定是否复用连接
                     pool.return_connection(&local_addr, local_conn.stream).await;
                 } else {
-                    pool.discard_connection(&local_addr, local_conn.stream).await;
+                    pool.discard_connection(&local_addr, local_conn.stream)
+                        .await;
                 }
                 return Ok(());
             }
@@ -395,7 +415,7 @@ struct LocalConn {
 }
 
 async fn connect_local(
-    local_addr: &str, 
+    local_addr: &str,
     pool: &Arc<ConnectionPool>,
     proxy_type: ProxyType,
 ) -> Result<LocalConn> {
