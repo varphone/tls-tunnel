@@ -1,5 +1,25 @@
 # TLS Tunnel - 改进与优化总结
 
+## 📊 项目完成度概览
+
+**当前版本**: v1.1.0  
+**总体完成度**: ~65%
+
+| 类别 | 完成项 | 总计 | 完成度 |
+|------|--------|------|--------|
+| 代码质量 | 6/6 | 100% | ✅ |
+| 功能增强 | 9/9 | 100% | ✅ |
+| 性能优化 | 1/3 | 33% | 🔄 |
+| 监控统计 | 4/5 | 80% | ✅ |
+| 安全增强 | 0/3 | 0% | ⏳ |
+| 配置管理 | 1/3 | 33% | 🔄 |
+| 可观测性 | 0/3 | 0% | ⏳ |
+| 用户体验 | 3/3 | 100% | ✅ |
+| 高级功能 | 0/3 | 0% | ⏳ |
+| 测试质量 | 1/4 | 25% | 🔄 |
+
+**图例**: ✅ 已完成 | 🔄 进行中 | ⏳ 计划中
+
 ## ✅ 已实施的改进
 
 ### 1. **代码质量改进**
@@ -43,18 +63,35 @@ export TLS_TUNNEL_LOCAL_CONNECT_RETRIES=5
 ```
 
 #### 2.3 配置生成工具
-- ✅ 新增 `generate` 命令
+- ✅ 新增 `template` 命令（原 `generate` 命令）
   - 生成服务器配置示例
   - 生成客户端配置示例
   - 支持输出到文件或标准输出
+  - 配置模板使用 `include_str!` 内嵌
 
-#### 2.4 配置检查功能
+#### 2.4 证书生成工具
+- ✅ 新增 `cert` 命令
+  - 生成自签名 TLS 证书
+  - 支持自定义 Common Name
+  - 支持多个 SubjectAltName
+  - 自动生成证书和私钥文件
+
+#### 2.5 systemd 服务管理
+- ✅ 新增 `register` 命令
+  - 注册为 systemd 服务（Linux）
+  - 支持服务器和客户端模式
+  - 自定义服务名称
+- ✅ 新增 `unregister` 命令
+  - 卸载 systemd 服务
+
+#### 2.6 配置检查功能
 - ✅ 新增 `check` 命令
   - 验证配置文件语法
   - 检查必需字段
   - 验证端口范围
   - 检查文件是否存在（证书、密钥）
   - 显示详细的验证结果
+  - 支持 JSON 输出格式
   - 提供常见问题提示
 
 使用示例：
@@ -69,14 +106,24 @@ export TLS_TUNNEL_LOCAL_CONNECT_RETRIES=5
 使用示例：
 ```bash
 # 生成服务器配置到标准输出
-./tls-tunnel generate server
+./tls-tunnel template server
 
 # 生成客户端配置到文件
-./tls-tunnel generate client -o my-client.toml
+./tls-tunnel template client -o my-client.toml
 
 # 生成服务器配置到文件
-./tls-tunnel generate server -o my-server.toml
+./tls-tunnel template server -o my-server.toml
 ```
+
+#### 2.7 日志系统增强
+- ✅ 实现详细级别控制
+  - 默认：关闭日志（`off`）
+  - `-v`：info 级别
+  - `-vv`：debug 级别
+  - `-vvv`：trace 级别
+- ✅ 清理冗余日志输出
+  - 移除客户端中的重复日志
+  - 保持简洁的控制台输出
 
 ## 📋 建议的未来改进
 
@@ -116,33 +163,68 @@ export TLS_TUNNEL_POOL_CONNECT_TIMEOUT_MS=5000  # 连接超时
 ### 4. **监控与统计**
 
 #### 4.1 连接统计
-- [ ] 实时连接数统计
-- [ ] 数据传输量统计
-- [ ] 每个代理的独立统计
+- ✅ 实时连接数统计
+- ✅ 数据传输量统计
+- ✅ 每个代理的独立统计
+- ✅ HTTP 统计服务器
+  - JSON API 端点（`/api/stats`）
+  - HTML 仪表板（`/`）
+  - 自动刷新（5 秒）
 
-#### 4.2 健康检查
-- [ ] HTTP 健康检查端点
+实现细节：
+```rust
+// 统计结构（src/stats.rs）
+struct ProxyStats {
+    name: String,
+    publish_addr: String,
+    publish_port: u16,
+    local_port: u16,
+    total_connections: u64,
+    active_connections: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+    start_time: u64,
+}
+```
+
+配置示例：
+```toml
+[server]
+# 启用统计服务器
+stats_port = 9090
+```
+
+#### 4.2 实时监控工具
+- ✅ 新增 `top` 命令
+  - 交互式终端界面（ratatui）
+  - 实时数据展示
+  - 自定义刷新间隔
+  - 友好的数据格式化
+    - 字节数自动格式化（B/KB/MB/GB/TB）
+    - 时长人性化显示（秒/分/时/天）
+  - 交互控制：
+    - `q` / `Esc`：退出
+    - `r`：手动刷新
+  - 彩色高亮活跃连接
+
+使用示例：
+```bash
+# 查看实时统计
+./tls-tunnel top --url http://localhost:9090
+
+# 自定义刷新间隔
+./tls-tunnel top -u http://localhost:9090 -i 5
+```
+
+#### 4.3 健康检查
 - [ ] Prometheus metrics 导出
 - [ ] 连接质量监控
 
 示例实现：
 ```rust
-// 添加统计结构
-struct ConnectionStats {
-    total_connections: AtomicU64,
-    active_connections: AtomicU64,
-    bytes_sent: AtomicU64,
-    bytes_received: AtomicU64,
-}
-
-// 健康检查端点
-async fn health_check() -> impl warp::Reply {
-    warp::reply::json(&json!({
-        "status": "healthy",
-        "active_connections": STATS.active_connections.load(Ordering::Relaxed),
-        "total_connections": STATS.total_connections.load(Ordering::Relaxed),
-    }))
-}
+// 统计已通过 src/stats.rs 实现
+// 包含 ProxyStats、ProxyStatsTracker、StatsManager
+// 支持线程安全的原子操作统计
 ```
 
 ### 5. **安全增强**
@@ -218,15 +300,23 @@ async fn health_check() -> impl warp::Reply {
 
 ### 10. **测试与质量**
 
-#### 10.1 单元测试
+#### 10.1 代码质量
+- ✅ 通过 clippy 严格检查
+  - 移除冗余导入
+  - 使用 `#[derive(Default)]` 简化代码
+  - 使用 `io::Error::other()` 简化错误创建
+  - 使用 `Box<>` 优化大型枚举变体
+  - 所有警告已修复（`-D warnings`）
+
+#### 10.2 单元测试
 - [ ] 增加单元测试覆盖率
 - [ ] 集成测试套件
 
-#### 10.2 基准测试
+#### 10.3 基准测试
 - [ ] 性能基准测试
 - [ ] 压力测试工具
 
-#### 10.3 模糊测试
+#### 10.4 模糊测试
 - [ ] 协议模糊测试
 - [ ] 安全漏洞扫描
 
@@ -235,19 +325,20 @@ async fn health_check() -> impl warp::Reply {
 ### 高优先级
 1. ✅ 优雅关闭（已完成）
 2. ✅ 配置生成工具（已完成）
-3. [ ] 连接统计和监控
-4. [ ] 速率限制和 DoS 防护
+3. ✅ 连接统计和监控（已完成）
+4. ✅ 实时监控工具 top 命令（已完成）
+5. [ ] 速率限制和 DoS 防护
 
 ### 中优先级
-5. [ ] 健康检查端点
-6. [ ] 配置热重载
-7. [ ] 结构化日志
-8. [ ] 单元测试增强
+6. [ ] Prometheus metrics 导出
+7. [ ] 配置热重载
+8. [ ] 结构化日志
+9. [ ] 单元测试增强
 
 ### 低优先级
-9. [ ] 负载均衡
-10. [ ] 插件系统
-11. [ ] OpenTelemetry 集成
+10. [ ] 负载均衡
+11. [ ] 插件系统
+12. [ ] OpenTelemetry 集成
 
 ## 📊 性能指标目标
 
@@ -279,14 +370,40 @@ async fn health_check() -> impl warp::Reply {
 
 ## 📝 更新日志
 
-### v0.1.2 (开发中)
+### v1.1.0 (当前)
+- ✅ CLI 命令重构
+  - 拆分 `generate` 为独立命令（`template`、`cert`、`register`、`unregister`）
+  - 配置模板使用 `include_str!` 内嵌
+  - 支持 JSON 输出格式
+- ✅ 日志系统优化
+  - 详细级别控制（-v/-vv/-vvv）
+  - 默认关闭日志输出
+  - 清理冗余日志
+- ✅ 代码质量改进
+  - 通过 clippy 严格检查
+  - 移除冗余代码
+  - 优化枚举内存占用
+- ✅ 统计功能实现
+  - HTTP 统计服务器
+  - JSON API 和 HTML 仪表板
+  - 线程安全的实时统计
+- ✅ 实时监控工具
+  - 新增 `top` 命令
+  - 交互式终端界面（ratatui）
+  - 友好的数据展示和格式化
+- ✅ 依赖更新
+  - 添加 ratatui 0.29
+  - 添加 crossterm 0.28
+  - 添加 reqwest 0.12
+
+### v0.1.2
 - ✅ 实现本地连接池
   - 连接复用减少延迟
   - 自动预热和后台清理
   - 可配置的池参数
 - ✅ 优雅降级机制
 
-### v0.1.1 (当前)
+### v0.1.1
 - ✅ 移除不安全的 `unwrap()` 调用
 - ✅ 改进日志格式
 - ✅ 添加优雅关闭支持
@@ -320,3 +437,9 @@ async fn health_check() -> impl warp::Reply {
 - [协议说明](docs/development/PROTOCOL.md)
 - [开发指南](docs/development/DEVELOPMENT.md)
 - [测试指南](docs/development/TESTING.md)
+- [统计功能说明](docs/STATISTICS.md)
+- [Top 命令使用指南](docs/TOP_USAGE.md)
+- [HTTP/2 使用指南](docs/HTTP2_USAGE.md)
+- [WebSocket 使用指南](docs/WSS_USAGE.md)
+- [传输协议对比](docs/TRANSPORT_COMPARISON.md)
+- [反向代理配置](docs/REVERSE_PROXY.md)
