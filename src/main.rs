@@ -177,14 +177,45 @@ fn handle_generate(opts: GenerateOptions<'_>) -> Result<()> {
 
     if should_gen_systemd {
         let unit_out = opts.systemd_out.expect("unit path checked above");
+        
+        // 确定实际的服务类型（server 或 client）
+        let service_type = match opts.config_type {
+            "server" | "client" => opts.config_type,
+            "systemd" | "cert" => {
+                // 从 service_config 路径推断类型
+                if let Some(cfg_path) = opts.service_config {
+                    if cfg_path.contains("server") {
+                        "server"
+                    } else if cfg_path.contains("client") {
+                        "client"
+                    } else {
+                        anyhow::bail!(
+                            "Cannot determine service type from config path '{}'. \n\
+                            Please use 'generate server --systemd-out' or 'generate client --systemd-out' instead.",
+                            cfg_path
+                        );
+                    }
+                } else {
+                    anyhow::bail!(
+                        "When config_type is '{}', you must either:\n\
+                        1. Use 'generate server --systemd-out <path>' to generate a server service, or\n\
+                        2. Use 'generate client --systemd-out <path>' to generate a client service, or\n\
+                        3. Provide --service-config with a path containing 'server' or 'client'",
+                        opts.config_type
+                    );
+                }
+            }
+            other => anyhow::bail!("Unexpected config_type: {}", other),
+        };
+        
         generate_systemd_unit(
-            opts.config_type,
+            service_type,
             Path::new(unit_out),
             opts.service_exec,
             opts.service_config,
         )?;
 
-        println!("Generated systemd service file: {}", unit_out);
+        println!("Generated {} systemd service file: {}", service_type, unit_out);
     }
 
     Ok(())
