@@ -1,5 +1,20 @@
 # 变更日志
 
+## [1.2.0] - 2025-12-25
+
+### 新增
+- 📚 详细的架构文档 (`docs/ARCHITECTURE.md`)，包含系统拓扑、工作流程、模块依赖和设计特点说明。
+
+### 改进
+- ♻️ 将 `server.rs` 拆分为 7 个专用模块（registry, config, connection, yamux, visitor, stats, mod），显著提高代码可维护性和可读性。
+- ♻️ 将 `client.rs` 拆分为 5 个专用模块（config, connection, visitor, stream, mod），增强模块化结构。
+- 📖 使用 Mermaid 图表替代 ASCII 艺术，包括系统拓扑图、时序图、流程图、架构分层等（10+ 个可视化图表）。
+- 📄 简化 README.md 架构部分，保持清晰简洁，详细说明链接至独立的架构文档。
+- 🔧 修复 WSS 传输层的类型不匹配问题。
+
+### 修复
+- 🐛 修复 Visitor 模式时序图的 Mermaid 语法错误。
+
 ## [1.0.0] - 2025-12-24
 
 ### 新增
