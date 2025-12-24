@@ -7,7 +7,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Increase logging verbosity (can be used multiple times: -v, -vv, -vvv, -vvvv)
+    /// Increase logging verbosity (default: off, -v: info, -vv: debug, -vvv+: trace)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 }

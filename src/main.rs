@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
 
     // Initialize logging based on verbosity level
     let log_level = match cli.verbose {
-        0 => "warn",
+        0 => "off",
         1 => "info",
         2 => "debug",
         _ => "trace",
