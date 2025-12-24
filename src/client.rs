@@ -2,6 +2,7 @@ use crate::config::ClientFullConfig;
 use crate::connection_pool::{ConnectionPool, PoolConfig};
 use anyhow::{Context, Result};
 use rustls::pki_types::ServerName;
+use serde::Serialize;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -20,6 +21,8 @@ const RECONNECT_DELAY_SECS: u64 = 5;
 const LOCAL_CONNECT_RETRIES: u32 = 3;
 /// 本地服务连接重试延迟（毫秒）- 可通过环境变量 TLS_TUNNEL_LOCAL_RETRY_DELAY_MS 覆盖
 const LOCAL_RETRY_DELAY_MS: u64 = 1000;
+/// 协议版本（JSON 帧）
+const PROTOCOL_VERSION: u8 = 1;
 
 fn get_reconnect_delay() -> u64 {
     std::env::var(format!("{}RECONNECT_DELAY_SECS", ENV_PREFIX))
@@ -40,6 +43,12 @@ fn get_local_retry_delay() -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(LOCAL_RETRY_DELAY_MS)
+}
+
+#[derive(Serialize)]
+struct ProxyMessage<'a> {
+    version: u8,
+    proxies: &'a [crate::config::ProxyConfig],
 }
 
 /// 读取服务器返回的错误消息
@@ -65,7 +74,7 @@ where
 pub async fn run_client(config: ClientFullConfig, tls_connector: TlsConnector) -> Result<()> {
     loop {
         info!("Starting TLS tunnel client...");
-        
+
         match run_client_session(config.clone(), tls_connector.clone()).await {
             Ok(_) => {
                 info!("Client session ended normally");
@@ -84,10 +93,16 @@ pub async fn run_client(config: ClientFullConfig, tls_connector: TlsConnector) -
 /// 运行单次客户端会话
 async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnector) -> Result<()> {
     let client_config = &config.client;
-    info!("Connecting to {}:{}", client_config.server_addr, client_config.server_port);
+    info!(
+        "Connecting to {}:{}",
+        client_config.server_addr, client_config.server_port
+    );
 
     // 连接到服务器
-    let server_addr = format!("{}:{}", client_config.server_addr, client_config.server_port);
+    let server_addr = format!(
+        "{}:{}",
+        client_config.server_addr, client_config.server_port
+    );
     let tcp_stream = TcpStream::connect(&server_addr)
         .await
         .with_context(|| format!("Failed to connect to server {}", server_addr))?;
@@ -126,42 +141,15 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
             Err(_) => "Unknown error".to_string(),
         };
         error!("Authentication failed: {}", error_msg);
-        return Err(anyhow::anyhow!("Server authentication failed: {}", error_msg));
+        return Err(anyhow::anyhow!(
+            "Server authentication failed: {}",
+            error_msg
+        ));
     }
 
     info!("Authentication successful");
 
-    // 发送代理配置列表
-    let proxy_count = config.proxies.len() as u16;
-    tls_stream.write_all(&proxy_count.to_be_bytes()).await?;
-
-    for proxy in &config.proxies {
-        // 发送代理名称
-        let name_bytes = proxy.name.as_bytes();
-        let name_len = (name_bytes.len() as u16).to_be_bytes();
-        tls_stream.write_all(&name_len).await?;
-        tls_stream.write_all(name_bytes).await?;
-
-        // 发送发布地址
-        let addr_bytes = proxy.publish_addr.as_bytes();
-        let addr_len = (addr_bytes.len() as u16).to_be_bytes();
-        tls_stream.write_all(&addr_len).await?;
-        tls_stream.write_all(addr_bytes).await?;
-
-        // 发送发布端口（服务器监听端口）
-        tls_stream.write_all(&proxy.publish_port.to_be_bytes()).await?;
-
-        // 发送本地端口（客户端本地服务端口）
-        tls_stream.write_all(&proxy.local_port.to_be_bytes()).await?;
-
-        info!(
-            "Sent proxy config '{}': publish_addr={}, publish_port={}, local={}",
-            proxy.name, proxy.publish_addr, proxy.publish_port, proxy.local_port
-        );
-    }
-
-    tls_stream.flush().await?;
-    info!("Sent all proxy configurations");
+    send_proxies_json(&config, &mut tls_stream).await?;
 
     // 检查服务器是否接受配置（读取一个确认字节）
     let mut config_result = [0u8; 1];
@@ -174,7 +162,10 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
             Err(_) => "Unknown validation error".to_string(),
         };
         error!("Server rejected proxy configuration: {}", error_msg);
-        return Err(anyhow::anyhow!("Proxy configuration rejected: {}", error_msg));
+        return Err(anyhow::anyhow!(
+            "Proxy configuration rejected: {}",
+            error_msg
+        ));
     }
 
     info!("Server accepted proxy configurations");
@@ -194,13 +185,13 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
             std::env::var(format!("{}POOL_MAX_IDLE_SECS", ENV_PREFIX))
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(defaults.max_idle_time.as_secs())
+                .unwrap_or(defaults.max_idle_time.as_secs()),
         ),
         connect_timeout: Duration::from_millis(
             std::env::var(format!("{}POOL_CONNECT_TIMEOUT_MS", ENV_PREFIX))
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(defaults.connect_timeout.as_millis() as u64)
+                .unwrap_or(defaults.connect_timeout.as_millis() as u64),
         ),
         keepalive_time: std::env::var(format!("{}POOL_KEEPALIVE_SECS", ENV_PREFIX))
             .ok()
@@ -217,11 +208,16 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     let connection_pool = Arc::new(ConnectionPool::new(pool_config));
 
     // 预热连接池
-    let addresses: Vec<String> = config.proxies.iter()
+    let addresses: Vec<String> = config
+        .proxies
+        .iter()
         .map(|p| format!("127.0.0.1:{}", p.local_port))
         .collect();
-    
-    info!("Warming up connection pools for {} proxies...", addresses.len());
+
+    info!(
+        "Warming up connection pools for {} proxies...",
+        addresses.len()
+    );
     if let Err(e) = connection_pool.warmup_all(&addresses).await {
         warn!("Failed to warm up connection pools: {}", e);
     }
@@ -241,7 +237,7 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     use futures::future::poll_fn;
     loop {
         let stream_result = poll_fn(|cx| yamux_conn.poll_next_inbound(cx)).await;
-        
+
         match stream_result {
             Some(Ok(stream)) => {
                 info!("Received new stream from server");
@@ -270,6 +266,29 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     Ok(())
 }
 
+async fn send_proxies_json(
+    config: &ClientFullConfig,
+    tls_stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
+) -> Result<()> {
+    let msg = ProxyMessage {
+        version: PROTOCOL_VERSION,
+        proxies: &config.proxies,
+    };
+
+    let json = serde_json::to_vec(&msg)?;
+    let len = json.len() as u32;
+    tls_stream.write_all(&len.to_be_bytes()).await?;
+    tls_stream.write_all(&json).await?;
+    tls_stream.flush().await?;
+
+    info!(
+        "Sent proxy configurations (json) count={} bytes={}",
+        config.proxies.len(),
+        json.len()
+    );
+    Ok(())
+}
+
 /// 处理yamux流
 async fn handle_stream(
     mut stream: yamux::Stream,
@@ -277,7 +296,7 @@ async fn handle_stream(
     pool: Arc<ConnectionPool>,
 ) -> Result<()> {
     use futures::io::AsyncReadExt as FuturesAsyncReadExt;
-    
+
     // 读取目标端口
     let mut port_buf = [0u8; 2];
     stream.read_exact(&mut port_buf).await?;
@@ -286,7 +305,9 @@ async fn handle_stream(
     info!("Stream requests connection to local port {}", target_port);
 
     // 查找对应的代理配置
-    let proxy = config.proxies.iter()
+    let proxy = config
+        .proxies
+        .iter()
         .find(|p| p.local_port == target_port)
         .ok_or_else(|| anyhow::anyhow!("No proxy config found for port {}", target_port))?;
 
@@ -305,13 +326,9 @@ async fn handle_stream(
         let mut local_read = local_read.compat();
         let mut local_write = local_write.compat_write();
 
-        let local_to_stream = async {
-            futures::io::copy(&mut local_read, &mut stream_write).await
-        };
+        let local_to_stream = async { futures::io::copy(&mut local_read, &mut stream_write).await };
 
-        let stream_to_local = async {
-            futures::io::copy(&mut stream_read, &mut local_write).await
-        };
+        let stream_to_local = async { futures::io::copy(&mut stream_read, &mut local_write).await };
 
         let result = tokio::select! {
             result = local_to_stream => result,
@@ -343,7 +360,10 @@ async fn connect_local(local_addr: &str, pool: &Arc<ConnectionPool>) -> Result<T
             Ok(stream)
         }
         Err(e) => {
-            warn!("Failed to get connection from pool: {}, falling back to direct connection", e);
+            warn!(
+                "Failed to get connection from pool: {}, falling back to direct connection",
+                e
+            );
 
             let max_retries = get_local_retries();
             let retry_delay = get_local_retry_delay();
@@ -351,16 +371,29 @@ async fn connect_local(local_addr: &str, pool: &Arc<ConnectionPool>) -> Result<T
             for attempt in 1..=max_retries {
                 match TcpStream::connect(local_addr).await {
                     Ok(stream) => {
-                        info!("Connected to local service: {} (attempt {})", local_addr, attempt);
+                        info!(
+                            "Connected to local service: {} (attempt {})",
+                            local_addr, attempt
+                        );
                         return Ok(stream);
                     }
                     Err(err) => {
                         if attempt < max_retries {
-                            warn!("Failed to connect to {} (attempt {}): {}, retrying...", local_addr, attempt, err);
+                            warn!(
+                                "Failed to connect to {} (attempt {}): {}, retrying...",
+                                local_addr, attempt, err
+                            );
                             sleep(Duration::from_millis(retry_delay)).await;
                         } else {
-                            error!("Failed to connect to {} after {} attempts: {}", local_addr, max_retries, err);
-                            return Err(anyhow::anyhow!("Failed to connect to local service {}: {}", local_addr, err));
+                            error!(
+                                "Failed to connect to {} after {} attempts: {}",
+                                local_addr, max_retries, err
+                            );
+                            return Err(anyhow::anyhow!(
+                                "Failed to connect to local service {}: {}",
+                                local_addr,
+                                err
+                            ));
                         }
                     }
                 }

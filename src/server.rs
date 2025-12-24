@@ -8,6 +8,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{error, info, warn};
 use yamux::{Config as YamuxConfig, Connection as YamuxConnection};
 
+const SUPPORTED_PROTOCOL_VERSION: u8 = 1;
+
 /// 代理配置信息（从客户端接收）
 #[derive(Debug, Clone)]
 struct ProxyInfo {
@@ -99,14 +101,20 @@ fn validate_proxy_configs(proxies: &[ProxyInfo], server_bind_port: u16) -> Resul
 
 /// 运行服务器
 pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Result<()> {
-    info!("Starting TLS tunnel server on {}:{}", config.bind_addr, config.bind_port);
+    info!(
+        "Starting TLS tunnel server on {}:{}",
+        config.bind_addr, config.bind_port
+    );
 
     // 绑定监听端口
     let tls_listener = TcpListener::bind(format!("{}:{}", config.bind_addr, config.bind_port))
         .await
         .context("Failed to bind port")?;
 
-    info!("Server listening on {}:{}", config.bind_addr, config.bind_port);
+    info!(
+        "Server listening on {}:{}",
+        config.bind_addr, config.bind_port
+    );
     info!("Waiting for client connections... (Press Ctrl+C to stop)");
 
     // 设置 Ctrl+C 处理
@@ -152,7 +160,7 @@ async fn handle_client(
     config: ServerConfig,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
-    
+
     // TLS 握手
     let mut tls_stream = match acceptor.accept(stream).await {
         Ok(s) => s,
@@ -193,51 +201,7 @@ async fn handle_client(
     tls_stream.write_all(&[1]).await?;
     tls_stream.flush().await?;
 
-    // 读取客户端的代理配置
-    let mut proxy_count_buf = [0u8; 2];
-    tls_stream.read_exact(&mut proxy_count_buf).await?;
-    let proxy_count = u16::from_be_bytes(proxy_count_buf);
-
-    info!("Client has {} proxy configurations", proxy_count);
-
-    let mut proxies = Vec::new();
-    for _ in 0..proxy_count {
-        // 读取代理名称
-        let mut name_len_buf = [0u8; 2];
-        tls_stream.read_exact(&mut name_len_buf).await?;
-        let name_len = u16::from_be_bytes(name_len_buf) as usize;
-
-        let mut name_buf = vec![0u8; name_len];
-        tls_stream.read_exact(&mut name_buf).await?;
-        let name = String::from_utf8(name_buf)?;
-
-        // 读取发布地址
-        let mut publish_addr_len_buf = [0u8; 2];
-        tls_stream.read_exact(&mut publish_addr_len_buf).await?;
-        let publish_addr_len = u16::from_be_bytes(publish_addr_len_buf) as usize;
-
-        let mut publish_addr_buf = vec![0u8; publish_addr_len];
-        tls_stream.read_exact(&mut publish_addr_buf).await?;
-        let publish_addr = String::from_utf8(publish_addr_buf)?;
-
-        // 读取发布端口（服务器监听端口）
-        let mut publish_port_buf = [0u8; 2];
-        tls_stream.read_exact(&mut publish_port_buf).await?;
-        let publish_port = u16::from_be_bytes(publish_port_buf);
-
-        // 读取本地端口（客户端本地服务端口）
-        let mut local_port_buf = [0u8; 2];
-        tls_stream.read_exact(&mut local_port_buf).await?;
-        let local_port = u16::from_be_bytes(local_port_buf);
-
-        info!("Proxy '{}': {}:{} -> client:{}", name, publish_addr, publish_port, local_port);
-        proxies.push(ProxyInfo {
-            name,
-            publish_addr,
-            publish_port,
-            local_port,
-        });
-    }
+    let proxies = read_proxy_configs(&mut tls_stream).await?;
 
     // 验证代理配置
     if let Err(e) = validate_proxy_configs(&proxies, config.bind_port) {
@@ -322,6 +286,53 @@ async fn handle_client(
     Ok(())
 }
 
+async fn read_proxy_configs(
+    tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
+) -> Result<Vec<ProxyInfo>> {
+    // 读取长度前缀的 JSON
+    let mut len_buf = [0u8; 4];
+    tls_stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 {
+        anyhow::bail!("Proxy message length cannot be 0");
+    }
+    let mut buf = vec![0u8; len];
+    tls_stream.read_exact(&mut buf).await?;
+
+    #[derive(serde::Deserialize)]
+    struct ProxyMessage {
+        version: u8,
+        proxies: Vec<crate::config::ProxyConfig>,
+    }
+
+    let msg: ProxyMessage =
+        serde_json::from_slice(&buf).context("Failed to parse proxy message JSON")?;
+    if msg.version != SUPPORTED_PROTOCOL_VERSION {
+        anyhow::bail!("Unsupported protocol version {}", msg.version);
+    }
+
+    if msg.proxies.is_empty() {
+        anyhow::bail!("No proxy configurations provided");
+    }
+
+    let mut proxies = Vec::with_capacity(msg.proxies.len());
+    for p in msg.proxies {
+        proxies.push(ProxyInfo {
+            name: p.name,
+            publish_addr: p.publish_addr,
+            publish_port: p.publish_port,
+            local_port: p.local_port,
+        });
+    }
+
+    info!(
+        "Client (json v{}) has {} proxy configurations",
+        msg.version,
+        proxies.len()
+    );
+    Ok(proxies)
+}
+
 /// 运行yamux连接的poll循环
 async fn run_yamux_connection<T>(
     mut yamux_conn: YamuxConnection<T>,
@@ -341,9 +352,9 @@ where
                     // 创建新的outbound stream
                     let stream = poll_fn(|cx| yamux_conn.poll_new_outbound(cx)).await
                         .context("Failed to create yamux stream")?;
-                    
+
                     info!("Created yamux stream for proxy '{}'", proxy_name);
-                    
+
                     if response_tx.send(stream).await.is_err() {
                         warn!("Failed to send stream back to handler");
                     }
@@ -401,12 +412,9 @@ async fn start_proxy_listener(
                 let local_port = proxy.local_port;
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_proxy_connection(
-                        inbound,
-                        stream_tx,
-                        proxy_name,
-                        local_port,
-                    ).await {
+                    if let Err(e) =
+                        handle_proxy_connection(inbound, stream_tx, proxy_name, local_port).await
+                    {
                         error!("Failed to handle connection: {}", e);
                     }
                 });
@@ -429,11 +437,15 @@ async fn handle_proxy_connection(
 
     // 请求一个新的yamux stream
     let (response_tx, mut response_rx) = mpsc::channel(1);
-    stream_tx.send((response_tx, remote_port, proxy_name.clone())).await
+    stream_tx
+        .send((response_tx, remote_port, proxy_name.clone()))
+        .await
         .context("Failed to request yamux stream")?;
 
     // 等待stream
-    let mut stream = response_rx.recv().await
+    let mut stream = response_rx
+        .recv()
+        .await
         .ok_or_else(|| anyhow::anyhow!("Failed to receive yamux stream"))?;
 
     info!("Yamux stream created for '{}'", proxy_name);
@@ -448,18 +460,14 @@ async fn handle_proxy_connection(
     // 双向转发数据（使用futures的AsyncRead/Write，需要兼容层）
     let (inbound_read, inbound_write) = inbound.split();
     let (mut stream_read, mut stream_write) = futures::io::AsyncReadExt::split(stream);
-    
+
     // 转换tokio的split为futures兼容的
     let mut inbound_read = inbound_read.compat();
     let mut inbound_write = inbound_write.compat_write();
 
-    let inbound_to_stream = async {
-        futures::io::copy(&mut inbound_read, &mut stream_write).await
-    };
+    let inbound_to_stream = async { futures::io::copy(&mut inbound_read, &mut stream_write).await };
 
-    let stream_to_inbound = async {
-        futures::io::copy(&mut stream_read, &mut inbound_write).await
-    };
+    let stream_to_inbound = async { futures::io::copy(&mut stream_read, &mut inbound_write).await };
 
     tokio::select! {
         result = inbound_to_stream => {

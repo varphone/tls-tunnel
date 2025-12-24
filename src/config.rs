@@ -131,38 +131,41 @@ pub enum AppConfig {
 
 impl AppConfig {
     /// 从文件加载配置（自动检测类型）
+    #[allow(dead_code)]
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: AppConfig = toml::from_str(&content)?;
-        
+
         // 验证客户端配置
         if let AppConfig::Client(ref client_config) = config {
-            client_config.validate()
+            client_config
+                .validate()
                 .context("Configuration validation failed")?;
         }
-        
+
         Ok(config)
     }
-    
+
     /// 从文件加载服务器配置
     pub fn load_server_config(path: &str) -> anyhow::Result<ServerConfig> {
         #[derive(Deserialize)]
         struct ServerConfigWrapper {
             server: ServerConfig,
         }
-        
+
         let content = std::fs::read_to_string(path)?;
-        let wrapper: ServerConfigWrapper = toml::from_str(&content)
-            .context("Failed to parse server configuration")?;
+        let wrapper: ServerConfigWrapper =
+            toml::from_str(&content).context("Failed to parse server configuration")?;
         Ok(wrapper.server)
     }
-    
+
     /// 从文件加载客户端配置
     pub fn load_client_config(path: &str) -> anyhow::Result<ClientFullConfig> {
         let content = std::fs::read_to_string(path)?;
-        let config: ClientFullConfig = toml::from_str(&content)
-            .context("Failed to parse client configuration")?;
-        config.validate()
+        let config: ClientFullConfig =
+            toml::from_str(&content).context("Failed to parse client configuration")?;
+        config
+            .validate()
             .context("Configuration validation failed")?;
         Ok(config)
     }

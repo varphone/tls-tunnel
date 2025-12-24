@@ -31,7 +31,7 @@ pub enum Commands {
         /// 配置类型 (server 或 client)
         #[arg(value_parser = ["server", "client"])]
         config_type: String,
-        
+
         /// 输出文件路径
         #[arg(short, long)]
         output: Option<String>,

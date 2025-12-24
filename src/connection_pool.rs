@@ -40,6 +40,7 @@ impl Default for PoolConfig {
 /// 池中的连接
 struct PooledConnection {
     stream: TcpStream,
+    #[allow(dead_code)]
     created_at: Instant,
     last_used: Instant,
 }
@@ -90,8 +91,12 @@ impl AddressPool {
         if let Some(mut pooled) = self.idle_connections.pop() {
             pooled.update_last_used();
             self.active_count += 1;
-            debug!("Reusing pooled connection to {} (active: {}, idle: {})", 
-                   self.address, self.active_count, self.idle_connections.len());
+            debug!(
+                "Reusing pooled connection to {} (active: {}, idle: {})",
+                self.address,
+                self.active_count,
+                self.idle_connections.len()
+            );
             return Ok(pooled.stream);
         }
 
@@ -106,12 +111,16 @@ impl AddressPool {
         }
 
         // 创建新连接
-        debug!("Creating new connection to {} (active: {}, idle: {})", 
-               self.address, self.active_count, self.idle_connections.len());
-        
+        debug!(
+            "Creating new connection to {} (active: {}, idle: {})",
+            self.address,
+            self.active_count,
+            self.idle_connections.len()
+        );
+
         let stream = tokio::time::timeout(
             self.config.connect_timeout,
-            TcpStream::connect(&self.address)
+            TcpStream::connect(&self.address),
         )
         .await
         .context("Connection timeout")?
@@ -124,48 +133,60 @@ impl AddressPool {
     }
 
     /// 归还连接到池中
+    #[allow(dead_code)]
     fn return_connection(&mut self, stream: TcpStream) {
         self.active_count = self.active_count.saturating_sub(1);
 
         // 检查是否应该保留这个连接
         let total_idle = self.idle_connections.len();
         if total_idle >= self.config.max_size - self.active_count {
-            debug!("Dropping connection to {} (pool full, idle: {})", 
-                   self.address, total_idle);
+            debug!(
+                "Dropping connection to {} (pool full, idle: {})",
+                self.address, total_idle
+            );
             return;
         }
 
-        debug!("Returning connection to pool for {} (active: {}, idle: {})", 
-               self.address, self.active_count, total_idle);
-        
+        debug!(
+            "Returning connection to pool for {} (active: {}, idle: {})",
+            self.address, self.active_count, total_idle
+        );
+
         self.idle_connections.push(PooledConnection::new(stream));
     }
 
     /// 清理过期的空闲连接
     fn cleanup_expired(&mut self) {
         let before = self.idle_connections.len();
-        self.idle_connections.retain(|conn| !conn.is_expired(self.config.max_idle_time));
+        self.idle_connections
+            .retain(|conn| !conn.is_expired(self.config.max_idle_time));
         let removed = before - self.idle_connections.len();
-        
+
         if removed > 0 {
-            debug!("Cleaned up {} expired connections to {}", removed, self.address);
+            debug!(
+                "Cleaned up {} expired connections to {}",
+                removed, self.address
+            );
         }
     }
 
     /// 预热连接池
     async fn warmup(&mut self) -> Result<()> {
-        let target = self.config.min_idle.saturating_sub(self.idle_connections.len());
-        
+        let target = self
+            .config
+            .min_idle
+            .saturating_sub(self.idle_connections.len());
+
         if target == 0 {
             return Ok(());
         }
 
         info!("Warming up {} connections to {}", target, self.address);
-        
+
         for _ in 0..target {
             match tokio::time::timeout(
                 self.config.connect_timeout,
-                TcpStream::connect(&self.address)
+                TcpStream::connect(&self.address),
             )
             .await
             {
@@ -182,13 +203,18 @@ impl AddressPool {
             }
         }
 
-        info!("Warmed up {} connections to {} (target: {})", 
-              self.idle_connections.len(), self.address, target);
-        
+        info!(
+            "Warmed up {} connections to {} (target: {})",
+            self.idle_connections.len(),
+            self.address,
+            target
+        );
+
         Ok(())
     }
 
     /// 获取池的统计信息
+    #[allow(dead_code)]
     fn stats(&self) -> PoolStats {
         PoolStats {
             active: self.active_count,
@@ -214,11 +240,19 @@ fn apply_keepalive(stream: &TcpStream, config: &PoolConfig) {
 
     let sock_ref = SockRef::from(stream);
     if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
-        warn!("Failed to set TCP keepalive on {}: {}", stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".into()), e);
+        warn!(
+            "Failed to set TCP keepalive on {}: {}",
+            stream
+                .peer_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| "unknown".into()),
+            e
+        );
     }
 }
 
 /// 连接池统计信息
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PoolStats {
     pub active: usize,
@@ -243,6 +277,7 @@ impl ConnectionPool {
     }
 
     /// 使用默认配置创建连接池
+    #[allow(dead_code)]
     pub fn with_defaults() -> Self {
         Self::new(PoolConfig::default())
     }
@@ -250,7 +285,7 @@ impl ConnectionPool {
     /// 获取连接
     pub async fn get(&self, address: &str) -> Result<TcpStream> {
         let mut pools = self.pools.lock().await;
-        
+
         let pool = pools
             .entry(address.to_string())
             .or_insert_with(|| AddressPool::new(address.to_string(), self.config.clone()));
@@ -259,9 +294,10 @@ impl ConnectionPool {
     }
 
     /// 归还连接（如果连接仍然可用）
+    #[allow(dead_code)]
     pub async fn return_connection(&self, address: &str, stream: TcpStream) {
         let mut pools = self.pools.lock().await;
-        
+
         if let Some(pool) = pools.get_mut(address) {
             pool.return_connection(stream);
         }
@@ -270,7 +306,7 @@ impl ConnectionPool {
     /// 预热指定地址的连接池
     pub async fn warmup(&self, address: &str) -> Result<()> {
         let mut pools = self.pools.lock().await;
-        
+
         let pool = pools
             .entry(address.to_string())
             .or_insert_with(|| AddressPool::new(address.to_string(), self.config.clone()));
@@ -289,12 +325,14 @@ impl ConnectionPool {
     }
 
     /// 获取指定地址的池统计信息
+    #[allow(dead_code)]
     pub async fn stats(&self, address: &str) -> Option<PoolStats> {
         let pools = self.pools.lock().await;
         pools.get(address).map(|pool| pool.stats())
     }
 
     /// 获取所有池的统计信息
+    #[allow(dead_code)]
     pub async fn all_stats(&self) -> HashMap<String, PoolStats> {
         let pools = self.pools.lock().await;
         pools
@@ -340,7 +378,7 @@ mod tests {
             created_at: Instant::now(),
             last_used: Instant::now() - Duration::from_secs(120),
         };
-        
+
         assert!(conn.is_expired(Duration::from_secs(60)));
         assert!(!conn.is_expired(Duration::from_secs(180)));
     }

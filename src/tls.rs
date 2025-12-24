@@ -17,10 +17,10 @@ pub fn load_server_config(cert_path: &Path, key_path: &Path) -> Result<Arc<rustl
         .context("Failed to parse certificates")?;
 
     // 加载私钥
-    let key_file = File::open(key_path)
-        .with_context(|| format!("Failed to open key file: {:?}", key_path))?;
+    let key_file =
+        File::open(key_path).with_context(|| format!("Failed to open key file: {:?}", key_path))?;
     let mut key_reader = BufReader::new(key_file);
-    
+
     let key = rustls_pemfile::private_key(&mut key_reader)
         .context("Failed to parse private key")?
         .context("No private key found")?;
@@ -51,7 +51,9 @@ pub fn load_client_config(
             .context("Failed to parse CA certificates")?;
 
         for cert in ca_certs {
-            root_store.add(cert).context("Failed to add CA certificate")?;
+            root_store
+                .add(cert)
+                .context("Failed to add CA certificate")?;
         }
     } else if !skip_verify {
         // 使用系统 CA 证书
