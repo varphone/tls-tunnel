@@ -50,47 +50,62 @@ src/transport/
 
 ## 实现状态
 
-### ✅ 已完成
+### ✅ 全部完成
 
-1. **传输层接口定义**
-   - `Transport` trait：统一的流接口
-   - `TransportClient` trait：客户端传输层
-   - `TransportServer` trait：服务器传输层
-   - `TransportType` enum：传输类型标识
+**传输层抽象框架**
+- `Transport` trait：统一的流接口
+- `TransportClient` trait：客户端传输层
+- `TransportServer` trait：服务器传输层
+- `TransportType` enum：传输类型标识
 
-2. **TLS 传输实现** (`src/transport/tls.rs`)
-   - `TlsTransportClient`: TLS 客户端传输
-   - `TlsTransportServer`: TLS 服务器传输
-   - 完全兼容现有的 TCP+TLS 功能
-
-3. **配置支持**
-   - `ServerConfig` 新增 `transport` 字段
-   - `ClientConfig` 新增 `transport` 字段
-   - 默认值为 `TransportType::Tls`（保持向后兼容）
-
-### 🚧 待实现
-
-1. **客户端/服务器集成**
-   - 修改 `client.rs` 使用传输层抽象
-   - 修改 `server.rs` 使用传输层抽象
-   - 根据配置动态选择传输方式
-
-### ✅ 新增完成
+**TLS 传输实现** (`src/transport/tls.rs`)
+- `TlsTransportClient`: TLS 客户端传输
+- `TlsTransportServer`: TLS 服务器传输
+- 完全兼容现有的 TCP+TLS 功能
 
 **HTTP/2 传输实现** (`src/transport/http2.rs`)
 - `Http2TransportClient`: 通过 HTTP/2 CONNECT 建立客户端隧道
 - `Http2TransportServer`: 接受 HTTP/2 CONNECT 请求
-- `Http2Stream`: 包装 H2 的 SendStream + RecvStream 实现 AsyncRead/AsyncWrite
+- `Http2Stream`: 包装 H2 的 SendStream + RecvStream
 - 支持 HTTP/2 流量控制和多路复用
-- **完全实现并通过编译** ✅
 
 **WebSocket 传输实现** (`src/transport/wss.rs`)
 - `WssTransportClient`: 通过 WebSocket Secure 建立客户端隧道
 - `WssTransportServer`: 接受 WebSocket 连接
-- `WssStream<S>`: 泛型包装器，将 WebSocketStream 实现为 AsyncRead/AsyncWrite
+- `WssStream<S>`: 泛型包装器，实现 AsyncRead/AsyncWrite
 - 支持二进制帧传输
-- 自动处理 Ping/Pong 消息
-- **完全实现并通过编译** ✅
+
+**传输层工厂** (`src/transport/factory.rs`)
+- `create_transport_client`: 根据配置创建传输客户端
+- `create_transport_server`: 根据配置创建传输服务器
+
+**客户端/服务器集成**
+- `client.rs`: 已集成，使用 `create_transport_client` 动态选择传输
+- `server.rs`: 已集成，使用 `create_transport_server` 动态选择传输
+- 支持所有三种传输方式：TLS、HTTP/2、WebSocket
+
+**配置支持**
+- `ServerConfig` 新增 `transport` 字段
+- `ClientConfig` 新增 `transport` 字段
+- 默认值为 `TransportType::Tls`（保持向后兼容）
+
+### 🚧 待完善
+
+1. **端到端测试**
+   - 测试 TLS 传输的完整流程
+   - 测试 HTTP/2 传输的完整流程
+   - 测试 WebSocket 传输的完整流程
+
+2. **性能测试**
+   - 基准测试各传输方式的吞吐量
+   - 延迟对比测试
+   - 资源使用分析
+
+3. **增强功能**
+   - HTTP 代理支持（HTTP/2 和 WebSocket）
+   - 自定义 WebSocket 路径
+   - 传输方式自动降级
+   - 连接池优化
 
 ## 配置示例
 

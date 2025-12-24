@@ -1,4 +1,5 @@
 use crate::config::ServerConfig;
+use crate::transport::create_transport_server;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -102,18 +103,18 @@ fn validate_proxy_configs(proxies: &[ProxyInfo], server_bind_port: u16) -> Resul
 /// 运行服务器
 pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Result<()> {
     info!(
-        "Starting TLS tunnel server on {}:{}",
-        config.bind_addr, config.bind_port
+        "Starting TLS tunnel server on {}:{} using {} transport",
+        config.bind_addr, config.bind_port, config.transport
     );
 
-    // 绑定监听端口
-    let tls_listener = TcpListener::bind(format!("{}:{}", config.bind_addr, config.bind_port))
+    // 创建传输层服务器
+    let transport_server = create_transport_server(&config, tls_acceptor)
         .await
-        .context("Failed to bind port")?;
+        .context("Failed to create transport server")?;
 
     info!(
-        "Server listening on {}:{}",
-        config.bind_addr, config.bind_port
+        "Server listening on {}:{} (transport: {})",
+        config.bind_addr, config.bind_port, transport_server.transport_type()
     );
     info!("Waiting for client connections... (Press Ctrl+C to stop)");
 
@@ -124,16 +125,15 @@ pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Resu
     // 接受客户端连接
     loop {
         tokio::select! {
-            result = tls_listener.accept() => {
+            result = transport_server.accept() => {
                 match result {
-                    Ok((stream, addr)) => {
-                        info!("Accepted connection from {}", addr);
-                        let acceptor = tls_acceptor.clone();
+                    Ok(transport_stream) => {
+                        info!("Accepted connection via {} transport", transport_server.transport_type());
                         let config = config.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = handle_client(stream, acceptor, config).await {
-                                error!("Client {} error: {}", addr, e);
+                            if let Err(e) = handle_client_transport(transport_stream, config).await {
+                                error!("Client error: {}", e);
                             }
                         });
                     }
@@ -153,7 +153,122 @@ pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Resu
     Ok(())
 }
 
-/// 处理客户端连接
+/// 处理客户端传输连接（使用传输抽象）
+async fn handle_client_transport(
+    transport_stream: std::pin::Pin<Box<dyn crate::transport::Transport>>,
+    config: ServerConfig,
+) -> Result<()> {
+    // 将 Pin<Box<dyn Transport>> 转换为可用的流
+    let mut tls_stream = transport_stream;
+
+    info!("Transport connection established");
+
+    // 认证
+    let mut key_len_buf = [0u8; 4];
+    tls_stream.read_exact(&mut key_len_buf).await?;
+    let key_len = u32::from_be_bytes(key_len_buf) as usize;
+
+    if key_len > 1024 {
+        let error_msg = "Authentication key too long (max 1024 bytes)";
+        warn!("Authentication failed: key too long");
+        tls_stream.write_all(&[0]).await.ok();
+        send_error_message(&mut tls_stream, error_msg).await.ok();
+        return Err(anyhow::anyhow!("Key too long"));
+    }
+
+    let mut key_buf = vec![0u8; key_len];
+    tls_stream.read_exact(&mut key_buf).await?;
+    let client_key = String::from_utf8(key_buf)?;
+
+    if client_key != config.auth_key {
+        let error_msg = "Invalid authentication key";
+        warn!("Authentication failed: invalid key");
+        tls_stream.write_all(&[0]).await.ok();
+        send_error_message(&mut tls_stream, error_msg).await.ok();
+        return Err(anyhow::anyhow!("Authentication failed"));
+    }
+
+    info!("Client authenticated successfully");
+    tls_stream.write_all(&[1]).await?;
+    tls_stream.flush().await?;
+
+    let proxies = read_proxy_configs(&mut tls_stream).await?;
+
+    // 验证代理配置
+    if let Err(e) = validate_proxy_configs(&proxies, config.bind_port) {
+        let error_msg = format!("Proxy configuration validation failed: {}", e);
+        error!("{}", error_msg);
+        tls_stream.write_all(&[0]).await.ok();
+        send_error_message(&mut tls_stream, &error_msg).await.ok();
+        return Err(e);
+    }
+
+    // 发送配置验证成功确认
+    tls_stream.write_all(&[1]).await?;
+    tls_stream.flush().await?;
+    info!("Proxy configurations validated and accepted");
+
+    // 建立 yamux 连接（使用兼容层转换tokio的AsyncRead/Write为futures的）
+    let yamux_config = YamuxConfig::default();
+    let tls_compat = tls_stream.compat();
+    let yamux_conn = YamuxConnection::new(tls_compat, yamux_config, yamux::Mode::Server);
+
+    info!("Yamux connection established");
+
+    // 创建channel用于请求新的yamux streams
+    let (stream_tx, stream_rx) = mpsc::channel::<(mpsc::Sender<yamux::Stream>, u16, String)>(100);
+
+    // 创建broadcast channel用于监控yamux连接状态
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
+    // 在后台运行yamux connection的poll循环
+    let shutdown_tx_clone = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let result = run_yamux_connection(yamux_conn, stream_rx).await;
+        if let Err(e) = &result {
+            info!("Client disconnected: {}", e);
+        } else {
+            info!("Client disconnected");
+        }
+        // 通知所有监听器关闭
+        let _ = shutdown_tx_clone.send(());
+    });
+
+    // 使用 JoinSet 管理所有代理监听器任务
+    let mut listener_tasks = tokio::task::JoinSet::new();
+
+    // 为每个代理启动监听器
+    for proxy in proxies {
+        let stream_tx_clone = stream_tx.clone();
+        let mut shutdown_rx = shutdown_tx.subscribe();
+
+        listener_tasks.spawn(async move {
+            tokio::select! {
+                result = start_proxy_listener(proxy, stream_tx_clone) => {
+                    if let Err(e) = result {
+                        error!("Proxy listener error: {}", e);
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Proxy listener shutting down due to yamux disconnection");
+                }
+            }
+        });
+    }
+
+    // 等待所有代理监听器完成
+    while let Some(result) = listener_tasks.join_next().await {
+        if let Err(e) = result {
+            error!("Proxy listener task error: {:?}", e);
+        }
+    }
+
+    info!("All proxy listeners stopped");
+    Ok(())
+}
+
+/// 处理客户端连接（旧版本 - 保留以防万一）
+#[allow(dead_code)]
 async fn handle_client(
     stream: TcpStream,
     acceptor: TlsAcceptor,
@@ -253,7 +368,7 @@ async fn handle_client(
 
         listener_tasks.spawn(async move {
             tokio::select! {
-                result = start_proxy_listener(proxy.clone(), stream_tx, peer_addr) => {
+                result = start_proxy_listener(proxy.clone(), stream_tx) => {
                     if let Err(e) = result {
                         error!("Proxy '{}' listener error: {}", proxy.name, e);
                     }
@@ -285,9 +400,12 @@ async fn handle_client(
     Ok(())
 }
 
-async fn read_proxy_configs(
-    tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
-) -> Result<Vec<ProxyInfo>> {
+async fn read_proxy_configs<S>(
+    tls_stream: &mut S,
+) -> Result<Vec<ProxyInfo>>
+where
+    S: AsyncReadExt + Unpin,
+{
     // 读取长度前缀的 JSON
     let mut len_buf = [0u8; 4];
     tls_stream.read_exact(&mut len_buf).await?;
@@ -390,15 +508,14 @@ where
 async fn start_proxy_listener(
     proxy: ProxyInfo,
     stream_tx: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
-    peer_addr: std::net::SocketAddr,
 ) -> Result<()> {
     let listener = TcpListener::bind(format!("{}:{}", proxy.publish_addr, proxy.publish_port))
         .await
         .with_context(|| format!("Failed to bind port {}", proxy.publish_port))?;
 
     info!(
-        "Proxy '{}' listening on {}:{} (forwarding to client {}:{})",
-        proxy.name, proxy.publish_addr, proxy.publish_port, peer_addr, proxy.local_port
+        "Proxy '{}' listening on {}:{} (forwarding to client local port {})",
+        proxy.name, proxy.publish_addr, proxy.publish_port, proxy.local_port
     );
 
     loop {

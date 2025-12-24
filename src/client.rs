@@ -1,7 +1,7 @@
 use crate::config::{ClientFullConfig, ProxyType};
 use crate::connection_pool::{ConnectionPool, PoolConfig};
+use crate::transport::create_transport_client;
 use anyhow::{Context, Result};
-use rustls::pki_types::ServerName;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -95,32 +95,31 @@ pub async fn run_client(config: ClientFullConfig, tls_connector: TlsConnector) -
 async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnector) -> Result<()> {
     let client_config = &config.client;
     info!(
-        "Connecting to {}:{}",
-        client_config.server_addr, client_config.server_port
+        "Connecting to {}:{} using {} transport",
+        client_config.server_addr, client_config.server_port, client_config.transport
     );
 
-    // 连接到服务器
-    let server_addr = format!(
-        "{}:{}",
-        client_config.server_addr, client_config.server_port
+    // 创建传输层客户端
+    let transport_client = create_transport_client(client_config, tls_connector)
+        .context("Failed to create transport client")?;
+
+    info!("Using transport type: {}", transport_client.transport_type());
+
+    // 通过传输层连接到服务器
+    let transport_stream = transport_client
+        .connect()
+        .await
+        .context("Failed to connect to server via transport")?;
+
+    info!(
+        "Connected to server via {} transport",
+        transport_client.transport_type()
     );
-    let tcp_stream = TcpStream::connect(&server_addr)
-        .await
-        .with_context(|| format!("Failed to connect to server {}", server_addr))?;
 
-    info!("Connected to server: {}", server_addr);
+    // 将 Pin<Box<dyn Transport>> 转换为可用的流
+    let mut tls_stream = transport_stream;
 
-    // TLS 握手
-    let server_name = ServerName::try_from(client_config.server_addr.clone())
-        .context("Invalid server name")?
-        .to_owned();
-
-    let mut tls_stream = tls_connector
-        .connect(server_name, tcp_stream)
-        .await
-        .context("TLS handshake failed")?;
-
-    info!("TLS handshake completed");
+    info!("Transport connection established");
 
     // 发送认证密钥
     let key_bytes = client_config.auth_key.as_bytes();
@@ -283,10 +282,13 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     Ok(())
 }
 
-async fn send_proxies_json(
+async fn send_proxies_json<S>(
     config: &ClientFullConfig,
-    tls_stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
-) -> Result<()> {
+    tls_stream: &mut S,
+) -> Result<()>
+where
+    S: AsyncWriteExt + Unpin,
+{
     let msg = ProxyMessage {
         version: PROTOCOL_VERSION,
         proxies: &config.proxies,

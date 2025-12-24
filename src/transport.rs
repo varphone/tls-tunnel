@@ -1,7 +1,9 @@
 mod http2;
 mod tls;
 mod wss;
+mod factory;
 
+pub use factory::{create_transport_client, create_transport_server};
 pub use http2::{Http2TransportClient, Http2TransportServer};
 pub use tls::{TlsTransportClient, TlsTransportServer};
 pub use wss::{WssTransportClient, WssTransportServer};
