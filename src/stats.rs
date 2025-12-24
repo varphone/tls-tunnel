@@ -141,6 +141,7 @@ impl StatsManager {
     }
 
     /// Get stats for a specific proxy
+    #[allow(dead_code)]
     pub fn get_proxy_stats(&self, name: &str) -> Option<ProxyStats> {
         self.proxies
             .lock()
@@ -150,6 +151,7 @@ impl StatsManager {
     }
 
     /// Clear all stats
+    #[allow(dead_code)]
     pub fn clear(&self) {
         self.proxies.lock().unwrap().clear();
     }

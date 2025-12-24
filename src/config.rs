@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// 代理类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyType {
     /// 原始 TCP 连接（不复用）
+    #[default]
     Tcp,
     /// HTTP/1.1（支持长连接复用）
     #[serde(rename = "http/1.1")]
@@ -15,12 +16,6 @@ pub enum ProxyType {
     /// HTTP/2.0（单连接多路复用）
     #[serde(rename = "http/2.0")]
     Http2,
-}
-
-impl Default for ProxyType {
-    fn default() -> Self {
-        Self::Tcp
-    }
 }
 
 impl ProxyType {

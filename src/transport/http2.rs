@@ -13,11 +13,10 @@ use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tracing;
 
 /// 服务器端流类型枚举，用于统一处理 TLS 和 plain TCP
 enum ServerStreamType {
-    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
     Plain(TcpStream),
 }
 
@@ -116,7 +115,7 @@ impl AsyncRead for Http2Stream {
 
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::other(e))),
             Poll::Ready(None) => {
                 // 流结束
                 Poll::Ready(Ok(()))
@@ -142,11 +141,11 @@ impl AsyncWrite for Http2Stream {
 
                 self.send_stream
                     .send_data(data, false)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                    .map_err(io::Error::other)?;
 
                 Poll::Ready(Ok(to_write))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::other(e))),
             Poll::Ready(None) => {
                 // 流已关闭
                 Poll::Ready(Err(io::Error::new(
@@ -167,7 +166,7 @@ impl AsyncWrite for Http2Stream {
         // 发送 END_STREAM 标志
         self.send_stream
             .send_data(Bytes::new(), true)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         Poll::Ready(Ok(()))
     }
 }
@@ -338,11 +337,11 @@ impl TransportServer for Http2TransportServer {
                 .await
                 .context("TLS handshake failed")?;
             tracing::debug!("HTTP/2 server: TLS handshake completed");
-            ServerStreamType::Tls(tls_stream)
+            Box::new(ServerStreamType::Tls(Box::new(tls_stream)))
         } else {
             // 反向代理模式 - 直接使用 TCP（TLS 由前端代理处理）
             tracing::debug!("HTTP/2 server: Using plain TCP (behind proxy)");
-            ServerStreamType::Plain(tcp_stream)
+            Box::new(ServerStreamType::Plain(tcp_stream))
         };
 
         // 3. HTTP/2 握手

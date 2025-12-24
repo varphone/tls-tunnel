@@ -17,7 +17,7 @@ use tokio_tungstenite::WebSocketStream;
 
 /// 服务器端流类型枚举，用于统一处理 TLS 和 plain TCP
 enum ServerStreamType {
-    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
     Plain(TcpStream),
 }
 
@@ -138,7 +138,7 @@ where
                     Poll::Pending
                 }
             },
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::other(e))),
             Poll::Ready(None) => {
                 // 流结束
                 Poll::Ready(Ok(()))
@@ -163,9 +163,9 @@ where
         match self.ws_stream.poll_ready_unpin(cx) {
             Poll::Ready(Ok(())) => match self.ws_stream.start_send_unpin(msg) {
                 Ok(()) => Poll::Ready(Ok(buf.len())),
-                Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+                Err(e) => Poll::Ready(Err(io::Error::other(e))),
             },
-            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -173,7 +173,7 @@ where
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         match self.ws_stream.poll_flush_unpin(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -181,7 +181,7 @@ where
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         match self.ws_stream.poll_close_unpin(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -286,10 +286,10 @@ impl TransportServer for WssTransportServer {
                 .accept(tcp_stream)
                 .await
                 .context("TLS handshake failed")?;
-            ServerStreamType::Tls(tls_stream)
+            Box::new(ServerStreamType::Tls(Box::new(tls_stream)))
         } else {
             // 反向代理模式 - 直接使用 TCP（TLS 由前端代理处理）
-            ServerStreamType::Plain(tcp_stream)
+            Box::new(ServerStreamType::Plain(tcp_stream))
         };
 
         // 3. WebSocket 握手

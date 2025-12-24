@@ -15,22 +15,17 @@ use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// 传输层类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportType {
     /// TCP + TLS（原生方式）
+    #[default]
     Tls,
     /// HTTP/2.0 over TLS
     #[serde(rename = "http2")]
     Http2,
     /// WebSocket Secure
     Wss,
-}
-
-impl Default for TransportType {
-    fn default() -> Self {
-        Self::Tls
-    }
 }
 
 impl std::fmt::Display for TransportType {
