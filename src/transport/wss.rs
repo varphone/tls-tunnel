@@ -4,6 +4,7 @@
 use super::{Transport, TransportClient, TransportServer, TransportType};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use rustls::pki_types::ServerName;
 use std::io;
@@ -158,7 +159,7 @@ where
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         // 将数据作为二进制消息发送
-        let msg = Message::Binary(buf.to_vec());
+        let msg = Message::Binary(Bytes::from(buf.to_vec()));
 
         match self.ws_stream.poll_ready_unpin(cx) {
             Poll::Ready(Ok(())) => match self.ws_stream.start_send_unpin(msg) {
