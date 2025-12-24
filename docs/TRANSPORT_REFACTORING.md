@@ -70,20 +70,25 @@ src/transport/
 
 ### 🚧 待实现
 
-1. **HTTP/2 传输** (`src/transport/http2.rs`)
-   - 使用 H2 库实现 HTTP/2 over TLS
-   - CONNECT 方法建立隧道
-   - 单个 HTTP/2 连接承载多个流
-
-2. **WebSocket 传输** (`src/transport/wss.rs`)
+1. **WebSocket 传输** (`src/transport/wss.rs`)
    - 使用 tokio-tungstenite 实现 WSS
    - WebSocket 协议升级
    - 二进制帧传输隧道数据
+   - **状态**: 占位实现，待完成
 
-3. **客户端/服务器集成**
+2. **客户端/服务器集成**
    - 修改 `client.rs` 使用传输层抽象
    - 修改 `server.rs` 使用传输层抽象
    - 根据配置动态选择传输方式
+
+### ✅ 新增完成
+
+**HTTP/2 传输实现** (`src/transport/http2.rs`)
+- `Http2TransportClient`: 通过 HTTP/2 CONNECT 建立客户端隧道
+- `Http2TransportServer`: 接受 HTTP/2 CONNECT 请求
+- `Http2Stream`: 包装 H2 的 SendStream + RecvStream 实现 AsyncRead/AsyncWrite
+- 支持 HTTP/2 流量控制和多路复用
+- **完全实现并通过编译** ✅
 
 ## 配置示例
 
