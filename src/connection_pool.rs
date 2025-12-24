@@ -155,6 +155,12 @@ impl AddressPool {
         self.idle_connections.push(PooledConnection::new(stream));
     }
 
+    /// 丢弃不可用的连接，同时修正计数
+    fn discard_connection(&mut self, _stream: TcpStream) {
+        self.active_count = self.active_count.saturating_sub(1);
+        debug!("Discarded bad connection to {}", self.address);
+    }
+
     /// 清理过期的空闲连接
     fn cleanup_expired(&mut self) {
         let before = self.idle_connections.len();
@@ -300,6 +306,15 @@ impl ConnectionPool {
 
         if let Some(pool) = pools.get_mut(address) {
             pool.return_connection(stream);
+        }
+    }
+
+    /// 丢弃不可用的连接（例如读写错误后）
+    pub async fn discard_connection(&self, address: &str, stream: TcpStream) {
+        let mut pools = self.pools.lock().await;
+
+        if let Some(pool) = pools.get_mut(address) {
+            pool.discard_connection(stream);
         }
     }
 

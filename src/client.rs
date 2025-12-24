@@ -320,9 +320,9 @@ async fn handle_stream(
     let mut attempted_retry = false;
 
     loop {
-        let mut local_stream = connect_local(&local_addr, &pool).await?;
+        let mut local_conn = connect_local(&local_addr, &pool).await?;
 
-        let (local_read, local_write) = local_stream.split();
+        let (local_read, local_write) = local_conn.stream.split();
         let mut local_read = local_read.compat();
         let mut local_write = local_write.compat_write();
 
@@ -338,9 +338,20 @@ async fn handle_stream(
         match result {
             Ok(_) => {
                 info!("Stream closed for proxy '{}'", proxy.name);
+                if local_conn.pooled {
+                    // Avoid reusing connections for now; discard to prevent stale HTTP/1.1 keepalive issues.
+                    pool.discard_connection(&local_addr, local_conn.stream)
+                        .await;
+                }
                 return Ok(());
             }
             Err(e) => {
+                if local_conn.pooled {
+                    // Do not reuse faulty pooled connection; discard and decrement count.
+                    pool.discard_connection(&local_addr, local_conn.stream)
+                        .await;
+                }
+
                 if attempted_retry {
                     error!("Stream handling error after retry: {}", e);
                     return Err(anyhow::anyhow!("Stream handling failed after retry: {}", e));
@@ -353,11 +364,19 @@ async fn handle_stream(
     }
 }
 
-async fn connect_local(local_addr: &str, pool: &Arc<ConnectionPool>) -> Result<TcpStream> {
+struct LocalConn {
+    stream: TcpStream,
+    pooled: bool,
+}
+
+async fn connect_local(local_addr: &str, pool: &Arc<ConnectionPool>) -> Result<LocalConn> {
     match pool.get(local_addr).await {
         Ok(stream) => {
             info!("Got connection to {} from pool", local_addr);
-            Ok(stream)
+            Ok(LocalConn {
+                stream,
+                pooled: true,
+            })
         }
         Err(e) => {
             warn!(
@@ -375,7 +394,10 @@ async fn connect_local(local_addr: &str, pool: &Arc<ConnectionPool>) -> Result<T
                             "Connected to local service: {} (attempt {})",
                             local_addr, attempt
                         );
-                        return Ok(stream);
+                        return Ok(LocalConn {
+                            stream,
+                            pooled: false,
+                        });
                     }
                     Err(err) => {
                         if attempt < max_retries {
