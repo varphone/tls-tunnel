@@ -1,6 +1,7 @@
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use crate::transport::TransportType;
 
 /// 代理类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +67,9 @@ pub struct ServerConfig {
     pub bind_addr: String,
     /// 服务器监听端口
     pub bind_port: u16,
+    /// 传输类型（tls, http2, wss）
+    #[serde(default)]
+    pub transport: TransportType,
     /// TLS 证书路径
     #[serde(default)]
     pub cert_path: Option<PathBuf>,
@@ -81,8 +85,11 @@ pub struct ServerConfig {
 pub struct ClientConfig {
     /// 服务器地址
     pub server_addr: String,
-    /// 服务器 TLS 端口
+    /// 服务器端口
     pub server_port: u16,
+    /// 传输类型（tls, http2, wss）
+    #[serde(default)]
+    pub transport: TransportType,
     /// 是否跳过证书验证（仅用于测试）
     #[serde(default)]
     pub skip_verify: bool,

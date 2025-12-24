@@ -4,6 +4,7 @@ mod config;
 mod connection_pool;
 mod server;
 mod tls;
+mod transport;
 
 use anyhow::{Context, Result};
 use clap::Parser;
