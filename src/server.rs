@@ -249,7 +249,6 @@ async fn handle_client(
     // 为每个代理启动监听器
     for proxy in proxies {
         let stream_tx = stream_tx.clone();
-        let peer_addr = peer_addr;
         let mut shutdown_signal = shutdown_tx.subscribe();
 
         listener_tasks.spawn(async move {

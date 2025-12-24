@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use rcgen::generate_simple_self_signed;
 use rustls::pki_types::CertificateDer;
 use std::fs::File;
 use std::io::BufReader;
@@ -75,6 +76,38 @@ pub fn load_client_config(
     }
 
     Ok(Arc::new(config))
+}
+
+/// 生成自签名证书和私钥并写入指定路径
+pub fn generate_self_signed_cert(
+    common_name: &str,
+    alt_names: &[String],
+    cert_out: &Path,
+    key_out: &Path,
+) -> Result<()> {
+    // rcgen 至少需要一个 SAN；确保包含 CN
+    let mut names: Vec<String> = if alt_names.is_empty() {
+        vec![common_name.to_string()]
+    } else {
+        alt_names.to_vec()
+    };
+
+    if !names.iter().any(|n| n == common_name) {
+        names.push(common_name.to_string());
+    }
+
+    let cert =
+        generate_simple_self_signed(names).context("Failed to generate self-signed certificate")?;
+    // rcgen 0.14 returns CertifiedKey; cert field carries der, signing_key holds private key
+    let cert_pem = cert.cert.pem();
+    let key_pem = cert.signing_key.serialize_pem();
+
+    std::fs::write(cert_out, cert_pem)
+        .with_context(|| format!("Failed to write certificate to {:?}", cert_out))?;
+    std::fs::write(key_out, key_pem)
+        .with_context(|| format!("Failed to write private key to {:?}", key_out))?;
+
+    Ok(())
 }
 
 /// 不验证证书的验证器（仅用于测试）

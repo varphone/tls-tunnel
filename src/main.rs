@@ -9,8 +9,21 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Commands};
 use config::AppConfig;
+use std::path::Path;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::info;
+
+struct GenerateOptions<'a> {
+    config_type: &'a str,
+    output: Option<&'a str>,
+    cert_out: Option<&'a str>,
+    key_out: Option<&'a str>,
+    common_name: &'a str,
+    alt_names: &'a [String],
+    systemd_out: Option<&'a str>,
+    service_config: Option<&'a str>,
+    service_exec: Option<&'a str>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,8 +49,25 @@ async fn main() -> Result<()> {
         Commands::Generate {
             config_type,
             output,
+            cert_out,
+            key_out,
+            common_name,
+            alt_names,
+            systemd_out,
+            service_config,
+            service_exec,
         } => {
-            generate_example_config(config_type, output.as_deref())?;
+            handle_generate(GenerateOptions {
+                config_type,
+                output: output.as_deref(),
+                cert_out: cert_out.as_deref(),
+                key_out: key_out.as_deref(),
+                common_name,
+                alt_names,
+                systemd_out: systemd_out.as_deref(),
+                service_config: service_config.as_deref(),
+                service_exec: service_exec.as_deref(),
+            })?;
             return Ok(());
         }
         Commands::Server { config } => {
@@ -71,6 +101,115 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// 处理生成示例配置、证书和 systemd 服务文件
+fn handle_generate(opts: GenerateOptions<'_>) -> Result<()> {
+    match opts.config_type {
+        "server" | "client" => {
+            generate_example_config(opts.config_type, opts.output)?;
+        }
+        "cert" | "systemd" => {
+            // skip config generation
+        }
+        other => {
+            anyhow::bail!("Unsupported generate type: {}", other);
+        }
+    }
+
+    // 是否生成证书
+    let should_gen_cert = match opts.config_type {
+        "cert" => true,
+        _ => opts.cert_out.is_some() || opts.key_out.is_some() || !opts.alt_names.is_empty(),
+    };
+
+    if should_gen_cert {
+        let cert_path = opts.cert_out.unwrap_or("cert.pem");
+        let key_path = opts.key_out.unwrap_or("key.pem");
+
+        let mut sans = if opts.alt_names.is_empty() {
+            vec![opts.common_name.to_string()]
+        } else {
+            opts.alt_names.to_vec()
+        };
+
+        if !sans.iter().any(|n| n == opts.common_name) {
+            sans.push(opts.common_name.to_string());
+        }
+
+        tls::generate_self_signed_cert(
+            opts.common_name,
+            &sans,
+            Path::new(cert_path),
+            Path::new(key_path),
+        )?;
+
+        println!(
+            "Generated self-signed certificate: {}\nGenerated private key: {}",
+            cert_path, key_path
+        );
+    }
+
+    let should_gen_systemd = match (opts.config_type, opts.systemd_out) {
+        ("systemd", Some(_)) => true,
+        ("systemd", None) => anyhow::bail!("--systemd-out is required when config_type=systemd"),
+        (_, Some(_)) => true,
+        _ => false,
+    };
+
+    if should_gen_systemd {
+        let unit_out = opts.systemd_out.expect("unit path checked above");
+        generate_systemd_unit(
+            opts.config_type,
+            Path::new(unit_out),
+            opts.service_exec,
+            opts.service_config,
+        )?;
+
+        println!("Generated systemd service file: {}", unit_out);
+    }
+
+    Ok(())
+}
+
+/// 生成 systemd 服务文件
+fn generate_systemd_unit(
+    mode: &str,
+    output: &Path,
+    exec_path: Option<&str>,
+    config_path: Option<&str>,
+) -> Result<()> {
+    let exec = if let Some(custom) = exec_path {
+        custom.to_string()
+    } else {
+        std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "tls-tunnel".to_string())
+    };
+
+    let config = if let Some(custom) = config_path {
+        custom.to_string()
+    } else if mode == "server" {
+        "/etc/tls-tunnel/server.toml".to_string()
+    } else {
+        "/etc/tls-tunnel/client.toml".to_string()
+    };
+
+    let description = if mode == "server" {
+        "TLS Tunnel Server"
+    } else {
+        "TLS Tunnel Client"
+    };
+
+    let unit = format!(
+        "[Unit]\nDescription={}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} {} --config {}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=multi-user.target\n",
+        description, exec, mode, config
+    );
+
+    std::fs::write(output, unit)
+        .with_context(|| format!("Failed to write systemd unit to {:?}", output))?;
+
+    Ok(())
+}
+
 /// 检查配置文件格式
 fn check_config(config_path: &str) -> Result<()> {
     use std::path::Path;
@@ -85,39 +224,36 @@ fn check_config(config_path: &str) -> Result<()> {
     println!("Checking configuration file: {}\n", config_path);
 
     // 尝试作为服务器配置加载
-    match AppConfig::load_server_config(config_path) {
-        Ok(server_config) => {
-            println!("✓ Configuration type: Server");
-            println!("✓ Bind address: {}", server_config.bind_addr);
-            println!("✓ Bind port: {}", server_config.bind_port);
-            println!("✓ Certificate path: {:?}", server_config.cert_path);
-            println!("✓ Key path: {:?}", server_config.key_path);
-            println!("✓ Auth key: {} characters", server_config.auth_key.len());
+    if let Ok(server_config) = AppConfig::load_server_config(config_path) {
+        println!("✓ Configuration type: Server");
+        println!("✓ Bind address: {}", server_config.bind_addr);
+        println!("✓ Bind port: {}", server_config.bind_port);
+        println!("✓ Certificate path: {:?}", server_config.cert_path);
+        println!("✓ Key path: {:?}", server_config.key_path);
+        println!("✓ Auth key: {} characters", server_config.auth_key.len());
 
-            // 检查证书文件是否存在
-            if !server_config.cert_path.exists() {
-                println!(
-                    "⚠ Warning: Certificate file not found: {:?}",
-                    server_config.cert_path
-                );
-            } else {
-                println!("✓ Certificate file exists");
-            }
-
-            // 检查密钥文件是否存在
-            if !server_config.key_path.exists() {
-                println!(
-                    "⚠ Warning: Key file not found: {:?}",
-                    server_config.key_path
-                );
-            } else {
-                println!("✓ Key file exists");
-            }
-
-            println!("\n✓ Server configuration is valid!");
-            return Ok(());
+        // 检查证书文件是否存在
+        if !server_config.cert_path.exists() {
+            println!(
+                "⚠ Warning: Certificate file not found: {:?}",
+                server_config.cert_path
+            );
+        } else {
+            println!("✓ Certificate file exists");
         }
-        Err(_) => {}
+
+        // 检查密钥文件是否存在
+        if !server_config.key_path.exists() {
+            println!(
+                "⚠ Warning: Key file not found: {:?}",
+                server_config.key_path
+            );
+        } else {
+            println!("✓ Key file exists");
+        }
+
+        println!("\n✓ Server configuration is valid!");
+        return Ok(());
     }
 
     // 尝试作为客户端配置加载
@@ -158,7 +294,7 @@ fn check_config(config_path: &str) -> Result<()> {
             }
 
             println!("\n✓ Client configuration is valid!");
-            return Ok(());
+            Ok(())
         }
         Err(e) => {
             println!("✗ Configuration validation failed!");
@@ -175,7 +311,7 @@ fn check_config(config_path: &str) -> Result<()> {
             println!("  6. For server config: [server] section with bind_addr, bind_port, cert_path, key_path, auth_key");
             println!("  7. For client config: [client] section with server_addr, server_port, auth_key, and [[proxies]] sections");
 
-            return Err(e);
+            Err(e)
         }
     }
 }

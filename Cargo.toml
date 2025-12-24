@@ -12,6 +12,7 @@ publish = false
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
+rcgen = { version = "0.14", default-features = true }
 rustls = "0.23"
 rustls-pemfile = "2.0"
 rustls-native-certs = "0.8"

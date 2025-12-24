@@ -364,6 +364,8 @@ impl ConnectionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[tokio::test]
     async fn test_pool_creation() {
@@ -371,10 +373,20 @@ mod tests {
         assert!(pool.all_stats().await.is_empty());
     }
 
+    fn make_test_stream() -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let _ = std::net::TcpStream::connect(addr);
+        });
+        let (stream, _) = listener.accept().unwrap();
+        TcpStream::from_std(stream).unwrap()
+    }
+
     #[test]
     fn test_pooled_connection_expiry() {
         let conn = PooledConnection {
-            stream: unsafe { std::mem::zeroed() },
+            stream: make_test_stream(),
             created_at: Instant::now(),
             last_used: Instant::now() - Duration::from_secs(120),
         };
