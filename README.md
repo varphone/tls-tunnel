@@ -1,0 +1,362 @@
+# TLS Tunnel - 基于 TLS 的反向代理隧道
+
+一个使用 Rust、Tokio、Rustls、Yamux 和 Clap 构建的高性能 TLS 反向代理隧道程序。
+
+## 功能特性
+
+- 🔒 **安全的 TLS 加密通信**
+- 🔑 **密钥认证机制**（防止未授权访问）
+- 🚀 **高性能异步 I/O**（基于 Tokio）
+- 🔄 **双向数据转发**
+- 📝 **灵活的配置文件**（TOML 格式）
+- 🎯 **多代理支持**（一个客户端可以管理多个端口转发）
+- 🛠️ **模块化设计**，易于扩展和维护
+- 🌊 **多路复用**（基于 Yamux，单个 TLS 连接支持多个并发流）
+- 📦 **动态配置**（服务器无需配置代理，由客户端动态提供）
+- 🔁 **自动重连**（客户端断线后自动重连，本地服务连接失败自动重试）
+- ✅ **配置验证**（客户端和服务器端双重验证，防止配置冲突）
+- 📋 **错误反馈**（服务器拒绝连接时返回详细错误信息）
+
+## 架构设计
+
+本程序使用**多路复用**技术（Yamux），通过单个 TLS 连接传输多个独立的数据流：
+
+```
+外部用户                服务器A                     客户端B
+┌──────┐              ┌──────────┐              ┌──────────┐
+│ curl │─HTTP:8080──►│  Proxy   │              │本地服务  │
+└──────┘              │ Listener │              │   3000   │
+                      └────┬─────┘              └────▲────┘
+                           │                         │
+                    创建yamux流                    连接本地
+                           │                         │
+                      ┌────▼────────────────────────┴────┐
+                      │   Yamux多路复用 over TLS 8443     │
+                      │  (单个连接，多个并发stream)      `│
+                      └───────────────────────────────—──┘
+```
+
+### 工作流程
+
+1. **建立连接阶段**：
+   - 客户端连接到服务器的 TLS 端口（8443）
+   - 客户端发送认证密钥
+   - 客户端发送代理配置列表（端口映射）
+   - 建立 Yamux 多路复用连接
+
+2. **数据转发阶段**：
+   - 外部用户访问服务器的 8080 端口
+   - 服务器通过 Yamux 创建新的 stream
+   - 服务器发送目标端口号给客户端
+   - 客户端连接到本地服务（3000 端口）
+   - 双向转发数据
+
+### 优势
+
+- **连接复用**：不需要为每个连接建立新的 TLS 握手
+- **性能提升**：减少了 TCP 和 TLS 握手的开销
+- **灵活扩展**：单个连接可以同时处理多个端口的代理
+- **动态配置**：服务器不需要预先配置代理，由客户端提供
+
+## 快速开始
+
+### 0. 生成配置文件（可选）
+
+可以使用内置工具生成配置文件模板（推荐放在 `examples/` 下）：
+
+```bash
+# 生成服务器配置
+./tls-tunnel generate server -o examples/server.toml
+
+# 生成客户端配置
+./tls-tunnel generate client -o examples/client.toml
+
+# 查看配置示例（不保存到文件）
+./tls-tunnel generate server
+
+# 检查配置文件是否有效
+./tls-tunnel check -c examples/server.toml
+./tls-tunnel check -c examples/client.toml
+```
+
+### 1. 生成 TLS 证书
+
+建议使用示例目录存放开发证书：`examples/certs/`
+
+**在 Linux/macOS 上：**
+```bash
+cd examples/certs
+chmod +x generate-cert.sh
+./generate-cert.sh
+```
+
+**在 Windows 上（使用 PowerShell）：**
+```powershell
+cd examples\certs
+./generate-cert.ps1
+```
+
+### 2. 配置服务器
+
+编辑 `examples/server.toml` 文件：
+
+```toml
+
+[server]
+# 服务器绑定地址
+bind_addr = "0.0.0.0"
+# 服务器监听端口
+bind_port = 8443
+
+# TLS 证书路径
+cert_path = "examples/certs/cert.pem"
+# TLS 私钥路径
+key_path = "examples/certs/key.pem"
+
+# 认证密钥（客户端必须提供相同的密钥才能连接）
+# 请修改为你自己的强密码！
+auth_key = "your-secret-auth-key-change-me"
+
+# 注意：不再需要配置代理列表，客户端会自动提供
+```
+
+### 3. 配置客户端
+
+编辑 `examples/client.toml` 文件：
+
+```toml
+
+[client]
+# 服务器地址
+server_addr = "your-server.com"
+# 服务器 TLS 端口
+server_port = 8443
+
+# 是否跳过证书验证（仅用于测试，生产环境请设置为 false）
+skip_verify = true
+# CA 证书路径（如果 skip_verify = false）
+ca_cert_path = "examples/certs/cert.pem"
+
+# 认证密钥（必须与服务器端一致）
+auth_key = "your-secret-auth-key-change-me"
+
+# 代理配置列表
+[[proxies]]
+name = "web-service"
+# 服务器发布端口（外部访问该端口）
+publish_port = 8080
+# 客户端本地服务端口（转发到该端口）
+local_port = 3000
+
+[[proxies]]
+name = "api-service"
+publish_port = 8081
+local_port = 3001
+```
+
+### 4. 运行程序
+
+**在服务器上：**
+```bash
+./tls-tunnel -c examples/server.toml server
+```
+
+**在客户端上：**
+```bash
+./tls-tunnel -c examples/client.toml client
+```
+
+### 5. 测试
+
+在任意机器上访问服务器：
+
+```bash
+curl http://your-server.com:8080
+```
+
+这会将请求通过 TLS 加密隧道转发到客户端的 3000 端口。
+
+### 6. 停止服务
+
+- **优雅关闭**：按 `Ctrl+C`，服务器会优雅关闭所有连接
+- **客户端**：按 `Ctrl+C` 停止，会自动尝试重连（除非终止进程）
+
+## 高级配置
+
+### 环境变量
+
+客户端支持通过环境变量调整重连参数（所有环境变量使用 `TLS_TUNNEL_` 前缀）：
+
+```bash
+# 设置重连延迟（秒）
+export TLS_TUNNEL_RECONNECT_DELAY_SECS=10
+
+# 设置本地服务连接重试次数
+export TLS_TUNNEL_LOCAL_CONNECT_RETRIES=5
+
+# 设置本地服务连接重试延迟（毫秒）
+export TLS_TUNNEL_LOCAL_RETRY_DELAY_MS=2000
+
+# 启动客户端
+./tls-tunnel client -c examples/client.toml
+```
+
+Windows (PowerShell):
+```powershell
+$env:TLS_TUNNEL_RECONNECT_DELAY_SECS=10
+$env:TLS_TUNNEL_LOCAL_CONNECT_RETRIES=5
+$env:TLS_TUNNEL_LOCAL_RETRY_DELAY_MS=2000
+.\tls-tunnel.exe client -c examples/client.toml
+```
+
+### 日志级别
+
+使用 `-l` 或 `--log-level` 参数调整日志详细程度：
+
+```bash
+# 详细调试日志
+./tls-tunnel -l debug server -c examples/server.toml
+
+# 仅显示警告和错误
+./tls-tunnel -l warn client -c examples/client.toml
+
+# 可用级别: trace, debug, info, warn, error
+```
+
+## 使用场景
+
+### 场景 1：内网穿透
+
+将内网服务暴露到公网：
+- **服务器**：有公网 IP 的 VPS
+- **客户端**：内网机器（运行本地服务）
+- **效果**：外部用户可以通过公网 IP 访问内网服务
+
+### 场景 2：开发环境共享
+
+与团队成员共享本地开发环境：
+- **服务器**：团队共享的开发服务器
+- **客户端**：你的本地开发机器
+- **效果**：团队成员可以访问你本地的开发服务
+
+### 场景 3：多服务代理
+
+同时代理多个服务：
+- 配置多个 `[[proxies]]` 条目
+- 每个服务使用不同的端口
+- 单个 TLS 连接处理所有代理
+
+## 命令行选项
+
+```bash
+# 使用配置文件
+./tls-tunnel -c examples/server.toml server
+./tls-tunnel -c examples/client.toml client
+
+# 设置日志级别
+./tls-tunnel -c examples/server.toml --log-level debug server
+./tls-tunnel -c examples/client.toml --log-level info client
+
+# 查看帮助
+./tls-tunnel --help
+./tls-tunnel server --help
+./tls-tunnel client --help
+```
+
+## 构建
+
+```bash
+# 构建项目
+cargo build --release
+
+# 运行测试
+cargo test
+
+# 查看文档
+cargo doc --open
+```
+
+## 项目结构
+
+```
+tls-tunnel/
+├── src/
+│   ├── main.rs          # 程序入口
+│   ├── cli.rs           # CLI 参数解析
+│   ├── config.rs        # 配置文件结构
+│   ├── tls.rs           # TLS 证书加载
+│   ├── server.rs        # 服务器实现（Yamux 多路复用）
+│   └── client.rs        # 客户端实现（Yamux 多路复用）
+├── Cargo.toml           # 依赖配置
+├── examples/
+│   ├── server.toml      # 服务器配置示例
+│   ├── client.toml      # 客户端配置示例
+│   └── certs/
+│       ├── cert.pem     # 开发用证书
+│       ├── key.pem      # 开发用私钥
+│       ├── generate-cert.ps1 # Windows 证书生成
+│       └── generate-cert.sh  # Linux/macOS 证书生成
+└── README.md            # 本文件
+```
+
+## 技术栈
+
+- **Rust** - 系统编程语言
+- **Tokio** - 异步运行时
+- **Rustls** - TLS 实现
+- **Yamux** - 多路复用协议
+- **Clap** - CLI 参数解析
+- **Serde** - 序列化/反序列化
+- **TOML** - 配置文件格式
+
+## 安全建议
+
+1. **修改默认密钥**：请务必修改 `auth_key`，使用强密码
+2. **使用有效证书**：生产环境应使用受信任的 CA 签发的证书
+3. **启用证书验证**：客户端配置中设置 `skip_verify = false`
+4. **限制监听地址**：服务器可以绑定到特定 IP 而不是 `0.0.0.0`
+5. **防火墙规则**：仅开放必要的端口
+
+## 协议设计
+
+### 握手协议
+
+1. TLS 握手
+2. 客户端 → 服务器：认证密钥长度（4字节）+ 认证密钥
+3. 服务器 → 客户端：认证结果（1字节：1=成功，0=失败）
+4. 客户端 → 服务器：代理数量（2字节）
+5. 对每个代理：名称长度（2字节）+ 名称 + 发布端口（2字节）+ 本地端口（2字节）
+6. 建立 Yamux 连接
+
+### 数据传输
+
+1. 服务器接受外部连接
+2. 服务器通过 Yamux 创建新 stream
+3. 服务器 → 客户端：目标端口（2字节）
+4. 客户端连接本地服务
+5. 双向转发数据
+
+## 📚 文档
+
+- **快速开始**：[快速入门指南](docs/guides/QUICKSTART.md)
+- **使用示例**：[详细使用示例](docs/guides/EXAMPLES.md)
+- **开发文档**：
+  - [架构设计](docs/development/ARCHITECTURE.md)
+  - [协议说明](docs/development/PROTOCOL.md)
+  - [重连机制](docs/development/RECONNECTION.md)
+  - [开发指南](docs/development/DEVELOPMENT.md)
+  - [测试指南](docs/development/TESTING.md)
+- **项目总览**：[功能总结](docs/SUMMARY.md)
+- **更新日志**：[CHANGELOG.md](CHANGELOG.md)
+
+## 许可证
+
+MIT
+
+## 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+## 作者
+
+TLS Tunnel Project
