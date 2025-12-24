@@ -1,0 +1,14 @@
+[server]
+# Server bind address
+bind_addr = "0.0.0.0"
+# Server listen port
+bind_port = 8443
+
+# TLS certificate path
+cert_path = "cert.pem"
+# TLS private key path
+key_path = "key.pem"
+
+# Authentication key (clients must provide the same key to connect)
+# Change this to your own strong password!
+auth_key = "your-secret-auth-key-change-me"

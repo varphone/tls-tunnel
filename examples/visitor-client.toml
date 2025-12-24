@@ -1,0 +1,93 @@
+# TLS Tunnel - 客户端配置示例（Visitor 模式）
+# 
+# Visitor 模式允许本客户端访问另一个客户端的服务（通过服务器中转）
+# 工作流程：
+#   1. 本客户端在本地绑定端口（bind_port）
+#   2. 本地应用连接到本客户端的 bind_port
+#   3. 本客户端通过隧道将请求发到服务器
+#   4. 服务器根据 name + publish_port 找到目标客户端的 proxy
+#   5. 服务器通过目标客户端的连接转发请求
+#   6. 目标客户端将请求转发到其本地服务
+# 
+# 这实现了客户端到客户端的内网穿透：
+#   - 客户端C应用 → 客户端C → 隧道 → 服务器(中转) → 隧道 → 客户端B → 客户端B本地服务
+#   - 服务器不需要绑定额外端口，只负责注册和转发
+
+[client]
+# 服务器地址和端口
+server_addr = "your-server.com"
+server_port = 8443
+
+# 用于 TLS 验证的服务器名称
+server_name = "your-server.com"
+
+# 传输协议: tls, http2, wss
+transport = "tls"
+
+# 客户端名称（可选，用于日志）
+name = "visitor-client"
+
+# ============================================
+# Visitor 配置
+# ============================================
+# Visitor 允许客户端访问服务器端的服务
+
+# 示例 1: 访问另一个客户端的 MySQL 数据库
+[[visitors]]
+# Visitor 名称（必须与目标 proxy 的 name 匹配）
+name = "mysql-proxy"
+
+# 本地绑定地址（默认 127.0.0.1）
+bind_addr = "127.0.0.1"
+
+# 本地绑定端口（本地应用连接此端口）
+bind_port = 3306
+
+# 目标 proxy 的 publish_port（与 name 共同组成匹配键）
+# 必须与目标客户端的 [[proxies]] publish_port 一致
+# 当多个客户端提供同名服务时，通过 (name, publish_port) 精确定位
+publish_port = 3306
+
+# 使用方式：
+# 1. 本地 MySQL 客户端连接 localhost:3306
+# 2. 本客户端通过隧道向服务器发送：(name="mysql-proxy", publish_port=3306)
+# 3. 服务器在注册表中查找匹配的 proxy
+# 4. 服务器通过目标客户端的连接转发数据
+# 5. 目标客户端将数据转发到其本地 MySQL 服务
+
+
+# 示例 2: 访问另一个客户端的 Redis
+[[visitors]]
+name = "redis-proxy"
+bind_addr = "127.0.0.1"
+bind_port = 6379
+publish_port = 6379
+
+
+# 示例 3: 访问另一个客户端的内部 API
+[[visitors]]
+name = "internal-api-proxy"
+bind_addr = "127.0.0.1"
+bind_port = 8080
+publish_port = 8080
+
+
+# ============================================
+# 可选：同时配置 Proxy 和 Visitor
+# ============================================
+# 一个客户端可以同时作为 proxy 提供者和 visitor 访问者
+
+# Proxy 配置：让其他客户端通过 visitor 访问本客户端的服务
+[[proxies]]
+name = "web-proxy"
+type = "tcp"
+local_port = 80
+publish_port = 80  # 用于其他客户端的 visitor 匹配
+# 不配置 publish_addr，仅支持 visitor 访问
+
+# Visitor 配置：访问其他客户端的服务
+[[visitors]]
+name = "postgres-proxy"
+bind_addr = "127.0.0.1"
+bind_port = 5432
+publish_port = 5432
