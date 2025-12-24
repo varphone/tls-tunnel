@@ -240,7 +240,7 @@ fn register_systemd_service(
         };
 
         let config_path = std::fs::canonicalize(_config)
-            .with_context(|| format!("Failed to resolve config path: {}", config))?
+            .with_context(|| format!("Failed to resolve config path: {}", _config))?
             .to_string_lossy()
             .into_owned();
 
