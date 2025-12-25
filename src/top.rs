@@ -38,7 +38,7 @@ impl Dashboard {
 
     /// Fetch statistics from server
     async fn fetch_stats(&mut self) -> Result<()> {
-        let url = format!("{}/api/stats", self.url);
+        let url = format!("{}/stats", self.url);
         let response = reqwest::get(&url)
             .await
             .context("Failed to fetch statistics")?;
