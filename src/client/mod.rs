@@ -127,7 +127,7 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     // 创建连接池
     let pool_config = get_pool_config().await;
 
-    // 为每个代理创建独立的连接池配置
+    // 为每个代理创建独立的连接池配置（使用 publish_port 作为键）
     let proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>> = Arc::new(
         config
             .proxies
@@ -143,7 +143,7 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
                 }
 
                 let pool = Arc::new(ConnectionPool::new(pool_cfg));
-                (proxy.local_port, pool)
+                (proxy.publish_port, pool)
             })
             .collect(),
     );
@@ -155,7 +155,7 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     );
     for proxy in &config.proxies {
         let local_addr = format!("127.0.0.1:{}", proxy.local_port);
-        if let Some(pool) = proxy_pools.get(&proxy.local_port) {
+        if let Some(pool) = proxy_pools.get(&proxy.publish_port) {
             if let Err(e) = pool.warmup(&local_addr).await {
                 warn!("Failed to warm up pool for proxy '{}': {}", proxy.name, e);
             }

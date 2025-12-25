@@ -231,9 +231,8 @@ impl TransportClient for WssTransportClient {
             .context("TLS handshake failed")?;
 
         // 3. WebSocket 握手
-        // 注意：使用 ws://localhost 作为 URL，因为 TLS 已经建立
-        // 实际路径通过 server_path 指定
-        let ws_url = format!("ws://localhost{}", self.server_path);
+        // 使用实际的服务器地址作为 Host header，这对于通过 Nginx 等反向代理连接很重要
+        let ws_url = format!("ws://{}{}", self.server_addr, self.server_path);
         let (ws_stream, _response) = tokio_tungstenite::client_async(ws_url, tls_stream)
             .await
             .context("WebSocket handshake failed")?;

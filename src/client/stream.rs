@@ -49,29 +49,39 @@ pub async fn handle_stream(
 ) -> Result<()> {
     use futures::io::AsyncReadExt as FuturesAsyncReadExt;
 
-    // 读取目标端口
+    // 读取 publish_port（与 visitor 保持一致）
     let mut port_buf = [0u8; 2];
     stream.read_exact(&mut port_buf).await?;
-    let target_port = u16::from_be_bytes(port_buf);
+    let publish_port = u16::from_be_bytes(port_buf);
 
-    info!("Stream requests connection to local port {}", target_port);
+    info!(
+        "Stream requests connection for publish_port {}",
+        publish_port
+    );
 
-    // 查找对应的代理配置
+    // 查找对应的代理配置（使用 publish_port 匹配）
     let proxy = config
         .proxies
         .iter()
-        .find(|p| p.local_port == target_port)
-        .ok_or_else(|| anyhow::anyhow!("No proxy config found for port {}", target_port))?;
+        .find(|p| p.publish_port == publish_port)
+        .ok_or_else(|| {
+            anyhow::anyhow!("No proxy config found for publish_port {}", publish_port)
+        })?;
 
-    info!("Found proxy '{}' for port {}", proxy.name, target_port);
+    info!(
+        "Found proxy '{}' (local_port: {}) for publish_port {}",
+        proxy.name, proxy.local_port, publish_port
+    );
 
-    // 获取该端口对应的连接池
+    // 获取该代理对应的连接池（连接池键是 publish_port）
     let pool = proxy_pools
-        .get(&target_port)
-        .ok_or_else(|| anyhow::anyhow!("No connection pool found for port {}", target_port))?
+        .get(&publish_port)
+        .ok_or_else(|| {
+            anyhow::anyhow!("No connection pool found for publish_port {}", publish_port)
+        })?
         .clone();
 
-    let local_addr = format!("127.0.0.1:{}", target_port);
+    let local_addr = format!("127.0.0.1:{}", proxy.local_port);
     let (mut stream_read, mut stream_write) = futures::io::AsyncReadExt::split(stream);
 
     // 尝试一次自动重连（本地转发失败时重建本地连接并重试）

@@ -55,7 +55,7 @@ pub async fn handle_proxy_connection(
     mut inbound: TcpStream,
     stream_tx: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
     proxy_name: String,
-    remote_port: u16,
+    publish_port: u16,
     tracker: ProxyStatsTracker,
 ) -> Result<()> {
     // 连接开始，增加计数
@@ -69,7 +69,7 @@ pub async fn handle_proxy_connection(
     // 请求一个新的yamux stream
     let (response_tx, mut response_rx) = mpsc::channel(1);
     stream_tx
-        .send((response_tx, remote_port, proxy_name.clone()))
+        .send((response_tx, publish_port, proxy_name.clone()))
         .await
         .context("Failed to request yamux stream")?;
 
@@ -81,12 +81,12 @@ pub async fn handle_proxy_connection(
 
     info!("Yamux stream created for '{}'", proxy_name);
 
-    // 发送协议头：目标端口
+    // 发送协议头：发布端口（与 visitor 保持一致使用 publish_port）
     use futures::io::AsyncWriteExt;
-    stream.write_all(&remote_port.to_be_bytes()).await?;
+    stream.write_all(&publish_port.to_be_bytes()).await?;
     stream.flush().await?;
 
-    info!("Sent target port {} to client", remote_port);
+    info!("Sent publish_port {} to client", publish_port);
 
     // 双向转发数据（使用futures的AsyncRead/Write，需要兼容层）
     let (inbound_read, inbound_write) = inbound.split();
