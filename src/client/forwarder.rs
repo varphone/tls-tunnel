@@ -1,5 +1,6 @@
 use crate::config::{ForwarderConfig, ProxyType};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -10,6 +11,7 @@ use tracing::{error, info, warn};
 
 use super::config::read_error_message;
 use super::geoip::GeoIpRouter;
+use super::ProxyHandler;
 
 /// 每个 forwarder 的最大并发连接数（防止 DoS 攻击）
 const MAX_CONCURRENT_CONNECTIONS: usize = 1000;
@@ -299,7 +301,12 @@ async fn parse_http_connect(stream: &mut TcpStream) -> Result<String> {
         Ok::<String, anyhow::Error>(target)
     })
     .await
-    .map_err(|_| anyhow::anyhow!("HTTP CONNECT parsing timeout after {:?}", PROTOCOL_PARSE_TIMEOUT))??;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "HTTP CONNECT parsing timeout after {:?}",
+            PROTOCOL_PARSE_TIMEOUT
+        )
+    })??;
 
     let target = result;
 
@@ -556,4 +563,116 @@ async fn handle_direct_connection(
         forwarder_name, target
     );
     Ok(())
+}
+
+/// Forwarder 处理器（实现 ProxyHandler trait）
+pub struct ForwarderHandler {
+    config: ForwarderConfig,
+    stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    router: Option<Arc<GeoIpRouter>>,
+    status: Arc<tokio::sync::RwLock<crate::client::HandlerStatus>>,
+    shutdown_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+}
+
+impl ForwarderHandler {
+    pub fn new(
+        config: ForwarderConfig,
+        stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+        router: Option<Arc<GeoIpRouter>>,
+    ) -> Self {
+        Self {
+            config,
+            stream_tx,
+            router,
+            status: Arc::new(tokio::sync::RwLock::new(
+                crate::client::HandlerStatus::Stopped,
+            )),
+            shutdown_tx: Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+}
+
+#[async_trait]
+impl ProxyHandler for ForwarderHandler {
+    async fn start(&self) -> Result<()> {
+        {
+            let mut status = self.status.write().await;
+            *status = crate::client::HandlerStatus::Starting;
+        }
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut tx = self.shutdown_tx.write().await;
+            *tx = Some(shutdown_tx);
+        }
+
+        {
+            let mut status = self.status.write().await;
+            *status = crate::client::HandlerStatus::Running;
+        }
+
+        let config = self.config.clone();
+        let stream_tx = self.stream_tx.clone();
+        let router = self.router.clone();
+        let status = self.status.clone();
+
+        tokio::select! {
+            result = run_forwarder_listener(config, stream_tx, router) => {
+                if let Err(e) = &result {
+                    let mut s = status.write().await;
+                    *s = crate::client::HandlerStatus::Failed(e.to_string());
+                }
+                result
+            }
+            _ = &mut shutdown_rx => {
+                let mut s = status.write().await;
+                *s = crate::client::HandlerStatus::Stopped;
+                Ok(())
+            }
+        }
+    }
+
+    async fn stop(&self) -> Result<()> {
+        {
+            let mut status = self.status.write().await;
+            *status = crate::client::HandlerStatus::Stopping;
+        }
+
+        let mut tx_lock = self.shutdown_tx.write().await;
+        if let Some(tx) = tx_lock.take() {
+            let _ = tx.send(());
+        }
+
+        {
+            let mut status = self.status.write().await;
+            *status = crate::client::HandlerStatus::Stopped;
+        }
+
+        Ok(())
+    }
+
+    async fn health_check(&self) -> bool {
+        let status = self.status.read().await;
+        matches!(*status, crate::client::HandlerStatus::Running)
+    }
+
+    fn status(&self) -> crate::client::HandlerStatus {
+        // 注意：这里使用 blocking read，在实际应用中可能需要改为异步
+        match self.status.try_read() {
+            Ok(s) => s.clone(),
+            Err(_) => crate::client::HandlerStatus::Running, // 默认返回 Running
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+
+    fn proxy_type(&self) -> ProxyType {
+        self.config.proxy_type
+    }
+
+    fn bind_address(&self) -> String {
+        format!("{}:{}", self.config.bind_addr, self.config.bind_port)
+    }
 }

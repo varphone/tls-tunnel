@@ -436,8 +436,9 @@ mod tests {
         TcpStream::from_std(stream).unwrap()
     }
 
-    #[test]
-    fn test_pooled_connection_expiry() {
+    #[tokio::test]
+    async fn test_pooled_connection_expiry() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         let conn = PooledConnection {
             stream: make_test_stream(),
             created_at: Instant::now(),

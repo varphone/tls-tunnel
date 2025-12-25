@@ -2,6 +2,10 @@ mod cli;
 mod client;
 mod config;
 mod connection_pool;
+mod error;
+mod io_util;
+mod limited_reader;
+mod rate_limiter;
 mod server;
 mod stats;
 mod tls;
@@ -36,7 +40,9 @@ fn check_config_file_permissions(config_path: &str) -> Result<()> {
             "⚠️  SECURITY WARNING: Config file '{}' is readable by others (permissions: {:o})\n\
              This file may contain sensitive information (auth_key).\n\
              RECOMMENDATION: chmod 600 {}",
-            config_path, mode & 0o777, config_path
+            config_path,
+            mode & 0o777,
+            config_path
         );
     }
 
@@ -45,7 +51,9 @@ fn check_config_file_permissions(config_path: &str) -> Result<()> {
         warn!(
             "⚠️  SECURITY WARNING: Config file '{}' is readable by group (permissions: {:o})\n\
              RECOMMENDATION: chmod 600 {}",
-            config_path, mode & 0o777, config_path
+            config_path,
+            mode & 0o777,
+            config_path
         );
     }
 
@@ -149,10 +157,10 @@ async fn main() -> Result<()> {
         }
         Commands::Server { config } => {
             let config_path = expand_path(config)?;
-            
+
             // 检查配置文件权限
             check_config_file_permissions(&config_path)?;
-            
+
             info!("Loading server configuration from: {}", config_path);
             let server_config = AppConfig::load_server_config(&config_path)?;
 
@@ -175,10 +183,10 @@ async fn main() -> Result<()> {
         }
         Commands::Client { config } => {
             let config_path = expand_path(config)?;
-            
+
             // 检查配置文件权限
             check_config_file_permissions(&config_path)?;
-            
+
             info!("Loading client configuration from: {}", config_path);
             let client_config = AppConfig::load_client_config(&config_path)?;
 

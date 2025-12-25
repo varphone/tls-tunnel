@@ -1,5 +1,7 @@
-use crate::config::VisitorConfig;
+use crate::config::{ProxyType, VisitorConfig};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::{sleep, Duration};
@@ -7,6 +9,7 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, warn};
 
 use super::config::read_error_message;
+use super::ProxyHandler;
 
 /// 运行 visitor 监听器
 /// 在客户端本地监听端口，接受连接后通过 yamux 连接到服务器
@@ -156,4 +159,111 @@ pub async fn handle_visitor_connection(
 
     info!("Visitor '{}': Connection closed", visitor.name);
     Ok(())
+}
+
+/// Visitor 处理器（实现 ProxyHandler trait）
+pub struct VisitorHandler {
+    config: VisitorConfig,
+    stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    status: Arc<tokio::sync::RwLock<crate::client::HandlerStatus>>,
+    shutdown_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+}
+
+impl VisitorHandler {
+    pub fn new(
+        config: VisitorConfig,
+        stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    ) -> Self {
+        Self {
+            config,
+            stream_tx,
+            status: Arc::new(tokio::sync::RwLock::new(
+                crate::client::HandlerStatus::Stopped,
+            )),
+            shutdown_tx: Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+}
+
+#[async_trait]
+impl ProxyHandler for VisitorHandler {
+    async fn start(&self) -> Result<()> {
+        {
+            let mut status = self.status.write().await;
+            *status = crate::client::HandlerStatus::Starting;
+        }
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut tx = self.shutdown_tx.write().await;
+            *tx = Some(shutdown_tx);
+        }
+
+        {
+            let mut status = self.status.write().await;
+            *status = crate::client::HandlerStatus::Running;
+        }
+
+        let config = self.config.clone();
+        let stream_tx = self.stream_tx.clone();
+        let status = self.status.clone();
+
+        tokio::select! {
+            result = run_visitor_listener(config, stream_tx) => {
+                if let Err(e) = &result {
+                    let mut s = status.write().await;
+                    *s = crate::client::HandlerStatus::Failed(e.to_string());
+                }
+                result
+            }
+            _ = &mut shutdown_rx => {
+                let mut s = status.write().await;
+                *s = crate::client::HandlerStatus::Stopped;
+                Ok(())
+            }
+        }
+    }
+
+    async fn stop(&self) -> Result<()> {
+        {
+            let mut status = self.status.write().await;
+            *status = crate::client::HandlerStatus::Stopping;
+        }
+
+        let mut tx_lock = self.shutdown_tx.write().await;
+        if let Some(tx) = tx_lock.take() {
+            let _ = tx.send(());
+        }
+
+        {
+            let mut status = self.status.write().await;
+            *status = crate::client::HandlerStatus::Stopped;
+        }
+
+        Ok(())
+    }
+
+    async fn health_check(&self) -> bool {
+        let status = self.status.read().await;
+        matches!(*status, crate::client::HandlerStatus::Running)
+    }
+
+    fn status(&self) -> crate::client::HandlerStatus {
+        match self.status.try_read() {
+            Ok(s) => s.clone(),
+            Err(_) => crate::client::HandlerStatus::Running,
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+
+    fn proxy_type(&self) -> ProxyType {
+        self.config.proxy_type
+    }
+
+    fn bind_address(&self) -> String {
+        format!("{}:{}", self.config.bind_addr, self.config.bind_port)
+    }
 }

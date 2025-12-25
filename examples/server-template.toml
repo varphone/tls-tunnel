@@ -12,3 +12,16 @@ key_path = "key.pem"
 # Authentication key (clients must provide the same key to connect)
 # Change this to your own strong password!
 auth_key = "your-secret-auth-key-change-me"
+
+# Rate limiting configuration (optional)
+# Uncomment to enable rate limiting
+# [server.rate_limit]
+# requests_per_second = 100  # Max requests per second
+# burst_size = 200           # Burst capacity for traffic spikes
+
+# Size limit configuration (optional)
+# Uncomment to customize size limits
+# [server.size_limits]
+# max_request_size = 1048576  # 1 MB
+# max_header_size = 8192      # 8 KB
+

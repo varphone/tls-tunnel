@@ -141,7 +141,10 @@ pub async fn handle_visitor_stream(
     })
     .await
     .map_err(|_| {
-        error!("Visitor stream request timeout after {:?}", CLIENT_REQUEST_TIMEOUT);
+        error!(
+            "Visitor stream request timeout after {:?}",
+            CLIENT_REQUEST_TIMEOUT
+        );
         anyhow::anyhow!("Client request timeout")
     })??;
 

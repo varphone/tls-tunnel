@@ -18,61 +18,132 @@ use tokio::sync::broadcast;
 use tokio::sync::{mpsc, RwLock};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+// 导入 rate_limiter 类型
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 
 use config::{read_client_configs, validate_proxy_configs};
 use connection::start_proxy_listener;
 use stats::start_stats_server;
 use yamux::run_yamux_connection;
 
-/// 运行服务器
+/// 服务器依赖（用于依赖注入）
+pub struct ServerDependencies {
+    pub stats_manager: StatsManager,
+    pub proxy_registry: ProxyRegistry,
+    pub rate_limiter: Option<Arc<RateLimiter>>,
+}
+
+impl ServerDependencies {
+    /// 创建默认依赖
+    pub fn new() -> Self {
+        Self {
+            stats_manager: StatsManager::new(),
+            proxy_registry: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            rate_limiter: None,
+        }
+    }
+}
+
+impl Default for ServerDependencies {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 服务器状态管理（避免过度克隆）
+#[derive(Clone)]
+pub struct ServerState {
+    pub config: Arc<ServerConfig>,
+    pub stats_manager: StatsManager,
+    pub proxy_registry: ProxyRegistry,
+    pub rate_limiter: Option<Arc<RateLimiter>>,
+}
+
+impl ServerState {
+    /// 从配置创建状态（使用默认依赖）
+    pub fn new(config: ServerConfig) -> Self {
+        // 根据配置创建速率限制器
+        let rate_limiter = config.rate_limit.as_ref().map(|cfg| {
+            Arc::new(RateLimiter::new(RateLimiterConfig {
+                requests_per_second: cfg.requests_per_second,
+                burst_size: cfg.burst_size,
+            }))
+        });
+
+        let mut deps = ServerDependencies::new();
+        deps.rate_limiter = rate_limiter;
+        Self::with_dependencies(config, deps)
+    }
+
+    /// 从配置和依赖创建状态
+    pub fn with_dependencies(config: ServerConfig, deps: ServerDependencies) -> Self {
+        Self {
+            config: Arc::new(config),
+            stats_manager: deps.stats_manager,
+            proxy_registry: deps.proxy_registry,
+            rate_limiter: deps.rate_limiter,
+        }
+    }
+}
+
+/// 运行服务器（支持依赖注入）
 pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Result<()> {
+    run_server_with_dependencies(config, tls_acceptor, None).await
+}
+
+/// 运行服务器（带自定义依赖，用于测试）
+pub async fn run_server_with_dependencies(
+    config: ServerConfig,
+    tls_acceptor: TlsAcceptor,
+    deps: Option<ServerDependencies>,
+) -> Result<()> {
     info!(
         "Starting TLS tunnel server on {}:{} using {} transport",
         config.bind_addr, config.bind_port, config.transport
     );
 
-    // 创建统计管理器
-    let stats_manager = StatsManager::new();
-
-    // 创建全局代理注册表
-    let proxy_registry: ProxyRegistry = Arc::new(RwLock::new(std::collections::HashMap::new()));
+    // 创建统一的状态管理（支持依赖注入）
+    let state = match deps {
+        Some(deps) => Arc::new(ServerState::with_dependencies(config, deps)),
+        None => Arc::new(ServerState::new(config)),
+    };
 
     // 如果配置了统计端口，启动HTTP统计服务器
-    if let Some(stats_port) = config.stats_port {
+    if let Some(stats_port) = state.config.stats_port {
         // 使用 stats_addr，如果未配置则回退到 bind_addr
         // validate() 已确保 bind_addr 和 stats_addr（如果存在）都不为空
-        let stats_addr = config
+        let stats_addr = state
+            .config
             .stats_addr
             .as_ref()
             .filter(|s| !s.trim().is_empty())
             .cloned()
-            .unwrap_or_else(|| config.bind_addr.clone());
+            .unwrap_or_else(|| state.config.bind_addr.clone());
 
-        let stats_manager_clone = stats_manager.clone();
-        let stats_addr_clone = stats_addr.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                start_stats_server(stats_addr_clone, stats_port, stats_manager_clone).await
-            {
-                error!("Stats server error: {}", e);
-            }
-        });
         info!(
             "Stats server will listen on http://{}:{}",
             stats_addr, stats_port
         );
+
+        let stats_manager = state.stats_manager.clone();
+        tokio::spawn(async move {
+            if let Err(e) = start_stats_server(stats_addr, stats_port, stats_manager).await {
+                error!("Stats server error: {}", e);
+            }
+        });
     }
 
     // 创建传输层服务器
-    let transport_server = create_transport_server(&config, tls_acceptor)
+    let transport_server = create_transport_server(&state.config, tls_acceptor)
         .await
         .context("Failed to create transport server")?;
 
     info!(
         "Server listening on {}:{} (transport: {})",
-        config.bind_addr,
-        config.bind_port,
+        state.config.bind_addr,
+        state.config.bind_port,
         transport_server.transport_type()
     );
     info!("Waiting for client connections... (Press Ctrl+C to stop)");
@@ -88,12 +159,28 @@ pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Resu
                 match result {
                     Ok(transport_stream) => {
                         info!("Accepted connection via {} transport", transport_server.transport_type());
-                        let config = config.clone();
-                        let stats_manager = stats_manager.clone();
-                        let proxy_registry = proxy_registry.clone();
+
+                        // 应用速率限制
+                        if let Some(ref limiter) = state.rate_limiter {
+                            match limiter.check() {
+                                Ok(_) => {
+                                    // 速率限制通过，继续处理
+                                }
+                                Err(wait_time) => {
+                                    warn!(
+                                        "Rate limit exceeded, rejecting connection (retry after {:?})",
+                                        wait_time
+                                    );
+                                    // 拒绝连接，不处理
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let state = Arc::clone(&state);
 
                         tokio::spawn(async move {
-                            if let Err(e) = handle_client_transport(transport_stream, config, stats_manager, proxy_registry).await {
+                            if let Err(e) = handle_client_transport(transport_stream, state).await {
                                 error!("Client error: {}", e);
                             }
                         });
@@ -117,9 +204,7 @@ pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Resu
 /// 处理客户端传输连接（使用传输抽象）
 async fn handle_client_transport(
     transport_stream: std::pin::Pin<Box<dyn crate::transport::Transport>>,
-    config: ServerConfig,
-    stats_manager: StatsManager,
-    proxy_registry: ProxyRegistry,
+    state: Arc<ServerState>,
 ) -> Result<()> {
     // 将 Pin<Box<dyn Transport>> 转换为可用的流
     let mut tls_stream = transport_stream;
@@ -143,7 +228,7 @@ async fn handle_client_transport(
     tls_stream.read_exact(&mut key_buf).await?;
     let client_key = String::from_utf8(key_buf)?;
 
-    if client_key != config.auth_key {
+    if client_key != state.config.auth_key {
         let error_msg = "Invalid authentication key";
         tracing::warn!("Authentication failed: invalid key");
         tls_stream.write_all(&[0]).await.ok();
@@ -158,7 +243,7 @@ async fn handle_client_transport(
     let client_configs = read_client_configs(&mut tls_stream).await?;
 
     // 验证代理配置
-    if let Err(e) = validate_proxy_configs(&client_configs.proxies, config.bind_port) {
+    if let Err(e) = validate_proxy_configs(&client_configs.proxies, state.config.bind_port) {
         let error_msg = format!("Proxy configuration validation failed: {}", e);
         error!("{}", error_msg);
         tls_stream.write_all(&[0]).await.ok();
@@ -191,7 +276,7 @@ async fn handle_client_transport(
         .map(|p| (p.name.clone(), p.publish_port))
         .collect();
     {
-        let mut registry = proxy_registry.write().await;
+        let mut registry = state.proxy_registry.write().await;
         for proxy in &client_configs.proxies {
             info!(
                 "Registering proxy '{}' with publish_port {} for visitor access",
@@ -208,21 +293,21 @@ async fn handle_client_transport(
     }
 
     // 确保断开时清理注册表
-    let proxy_registry_cleanup = proxy_registry.clone();
+    let proxy_registry_cleanup = state.proxy_registry.clone();
     let proxy_keys_cleanup = proxy_keys.clone();
 
     // 在后台运行yamux connection的poll循环
     let shutdown_tx_clone = shutdown_tx.clone();
-    let proxy_registry_for_visitor = proxy_registry.clone();
+    let proxy_registry_for_visitor = state.proxy_registry.clone();
     let stream_tx_clone = stream_tx.clone();
-    let server_config_clone = config.clone();
+    let server_config_ref = Arc::clone(&state.config);
     tokio::spawn(async move {
         let result = run_yamux_connection(
             yamux_conn,
             stream_rx,
             proxy_registry_for_visitor,
             stream_tx_clone,
-            &server_config_clone,
+            &server_config_ref,
         )
         .await;
         if let Err(e) = &result {
@@ -248,7 +333,7 @@ async fn handle_client_transport(
     // 为每个代理启动监听器
     for proxy in client_configs.proxies {
         // 注册统计追踪器
-        let tracker = stats_manager.register_proxy(
+        let tracker = state.stats_manager.register_proxy(
             proxy.name.clone(),
             proxy.publish_addr.clone(),
             proxy.publish_port,
@@ -257,7 +342,7 @@ async fn handle_client_transport(
 
         let stream_tx_clone = stream_tx.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        let stats_manager_clone = stats_manager.clone();
+        let stats_manager = state.stats_manager.clone();
         let proxy_name = proxy.name.clone();
 
         listener_tasks.spawn(async move {
@@ -272,7 +357,7 @@ async fn handle_client_transport(
                 }
             }
             // 清理统计信息
-            stats_manager_clone.unregister_proxy(&proxy_name);
+            stats_manager.unregister_proxy(&proxy_name);
         });
     }
 

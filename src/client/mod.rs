@@ -5,11 +5,15 @@ mod geoip;
 mod stream;
 mod visitor;
 
-use crate::config::ClientFullConfig;
+pub use forwarder::ForwarderHandler;
+pub use visitor::VisitorHandler;
+
+use crate::config::{ClientFullConfig, ProxyType};
 use crate::connection_pool::ConnectionPool;
 use crate::transport::create_transport_client;
 use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use futures::future::poll_fn;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +27,127 @@ use config::{get_reconnect_delay, read_error_message};
 use connection::get_pool_config;
 use stream::{handle_stream, send_client_config};
 use visitor::run_visitor_listener;
+
+/// 代理处理器状态
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlerStatus {
+    /// 启动中
+    Starting,
+    /// 运行中
+    Running,
+    /// 停止中
+    Stopping,
+    /// 已停止
+    Stopped,
+    /// 失败（包含错误信息）
+    Failed(String),
+}
+
+/// 统一的代理处理器 trait（支持 forwarder 和 visitor 的统一管理）
+#[async_trait]
+pub trait ProxyHandler: Send + Sync {
+    /// 启动代理处理器（监听并处理连接）
+    async fn start(&self) -> Result<()>;
+
+    /// 优雅停止代理处理器
+    async fn stop(&self) -> Result<()>;
+
+    /// 健康检查
+    async fn health_check(&self) -> bool;
+
+    /// 获取当前状态
+    fn status(&self) -> HandlerStatus;
+
+    /// 获取代理名称
+    fn name(&self) -> &str;
+
+    /// 获取代理类型
+    fn proxy_type(&self) -> ProxyType;
+
+    /// 获取监听地址
+    fn bind_address(&self) -> String;
+}
+
+/// 代理管理器（统一管理所有 ProxyHandler）
+pub struct ProxyManager {
+    handlers: Vec<Box<dyn ProxyHandler>>,
+}
+
+impl ProxyManager {
+    /// 创建新的代理管理器
+    pub fn new() -> Self {
+        Self {
+            handlers: Vec::new(),
+        }
+    }
+
+    /// 添加代理处理器
+    pub fn add_handler(&mut self, handler: Box<dyn ProxyHandler>) {
+        self.handlers.push(handler);
+    }
+
+    /// 启动所有代理处理器
+    pub async fn start_all(&self) -> Result<()> {
+        info!("Starting {} proxy handler(s)...", self.handlers.len());
+
+        for handler in &self.handlers {
+            let name = handler.name().to_string();
+            let proxy_type = handler.proxy_type();
+            let bind_addr = handler.bind_address();
+
+            info!(
+                "Starting proxy handler: '{}' ({:?}) on {}",
+                name, proxy_type, bind_addr
+            );
+        }
+
+        Ok(())
+    }
+
+    /// 停止所有代理处理器
+    pub async fn stop_all(&self) -> Result<()> {
+        info!("Stopping {} proxy handler(s)...", self.handlers.len());
+
+        for handler in &self.handlers {
+            info!("Stopping proxy handler: '{}'", handler.name());
+            if let Err(e) = handler.stop().await {
+                error!("Failed to stop handler '{}': {}", handler.name(), e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 列出所有代理处理器信息
+    pub fn list_handlers(&self) -> Vec<(&str, ProxyType, String, HandlerStatus)> {
+        self.handlers
+            .iter()
+            .map(|h| (h.name(), h.proxy_type(), h.bind_address(), h.status()))
+            .collect()
+    }
+
+    /// 获取健康状态
+    pub async fn health_check(&self) -> Vec<(String, bool)> {
+        let mut results = Vec::new();
+        for handler in &self.handlers {
+            let name = handler.name().to_string();
+            let healthy = handler.health_check().await;
+            results.push((name, healthy));
+        }
+        results
+    }
+
+    /// 获取处理器数量
+    pub fn handler_count(&self) -> usize {
+        self.handlers.len()
+    }
+}
+
+impl Default for ProxyManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// 运行客户端（带自动重连）
 pub async fn run_client(config: ClientFullConfig, tls_connector: TlsConnector) -> Result<()> {
