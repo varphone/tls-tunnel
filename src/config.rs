@@ -111,6 +111,18 @@ pub struct RoutingConfig {
     /// 通过代理的国家列表（为空表示其他所有国家）
     #[serde(default)]
     pub proxy_countries: Vec<String>,
+    /// 直连 IP/CIDR 列表（如 "192.168.0.0/16", "10.0.0.1"）
+    #[serde(default)]
+    pub direct_ips: Vec<String>,
+    /// 代理 IP/CIDR 列表
+    #[serde(default)]
+    pub proxy_ips: Vec<String>,
+    /// 直连域名列表（支持通配符，如 "*.baidu.com", "example.com"）
+    #[serde(default)]
+    pub direct_domains: Vec<String>,
+    /// 代理域名列表（支持通配符）
+    #[serde(default)]
+    pub proxy_domains: Vec<String>,
     /// 默认策略：direct（直连）或 proxy（代理），默认 proxy
     #[serde(default = "default_routing_strategy")]
     pub default_strategy: RoutingStrategy,

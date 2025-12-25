@@ -2184,6 +2184,7 @@ dependencies = [
  "futures",
  "h2",
  "http",
+ "ipnetwork",
  "maxminddb",
  "openssl",
  "ratatui",

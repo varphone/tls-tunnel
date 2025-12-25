@@ -18,7 +18,7 @@ transport = "tls"
 name = "socks5-proxy-smart"
 proxy_type = "socks5"
 bind_addr = "127.0.0.1"
-bind_port = 2080
+bind_port = 1080
 
 # GeoIP routing configuration
 [forwarders.routing]
@@ -39,6 +39,32 @@ direct_countries = ["CN", "HK", "TW", "MO"]
 # List of countries that must use proxy (empty = use default strategy)
 proxy_countries = []
 
+# Direct IP/CIDR list (supports CIDR notation)
+# Examples: "192.168.0.0/16", "10.0.0.1", "2001:db8::/32"
+direct_ips = [
+    "192.168.0.0/16",    # Private network
+    "10.0.0.0/8",        # Private network
+    "172.16.0.0/12",     # Private network
+]
+
+# Proxy IP/CIDR list
+proxy_ips = []
+
+# Direct domain list (supports wildcard)
+# Wildcards: "*.example.com" matches www.example.com, api.example.com, and example.com
+# Dot prefix: ".example.com" matches www.example.com but NOT example.com
+# Exact: "example.com" only matches example.com
+direct_domains = [
+    "*.baidu.com",
+    "*.qq.com",
+    "*.taobao.com",
+    "*.alipay.com",
+    "*.163.com",
+]
+
+# Proxy domain list (supports wildcard)
+proxy_domains = []
+
 # Default strategy for countries not in any list: "direct" or "proxy"
 default_strategy = "proxy"
 
@@ -47,5 +73,5 @@ default_strategy = "proxy"
 name = "http-proxy"
 proxy_type = "http"
 bind_addr = "127.0.0.1"
-bind_port = 9080
+bind_port = 8080
 # No routing configuration = always use proxy

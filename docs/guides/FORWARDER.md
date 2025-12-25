@@ -248,7 +248,7 @@ bind_port = 1080
 
 ### 基于 GeoIP 的智能路由
 
-使用 GeoIP 数据库实现智能路由，根据目标 IP 的地理位置决定是直连还是走代理：
+使用 GeoIP 数据库和自定义规则实现智能路由，根据目标地址决定是直连还是走代理：
 
 ```toml
 [[forwarders]]
@@ -268,16 +268,45 @@ direct_countries = ["CN", "HK", "TW", "MO"]
 # 代理国家列表（为空表示其他所有国家）
 proxy_countries = []
 
+# 直连 IP/CIDR 列表（支持 CIDR 格式）
+direct_ips = [
+    "192.168.0.0/16",   # 内网
+    "10.0.0.0/8",       # 内网
+    "223.5.5.5",        # 阿里 DNS
+]
+
+# 代理 IP/CIDR 列表
+proxy_ips = []
+
+# 直连域名列表（支持通配符）
+direct_domains = [
+    "*.baidu.com",      # 百度所有子域名
+    "*.qq.com",         # 腾讯所有子域名
+    "example.com",      # 精确匹配
+]
+
+# 代理域名列表（支持通配符）
+proxy_domains = []
+
 # 默认策略："direct" 或 "proxy"
 default_strategy = "proxy"
 ```
 
-**工作原理**：
-1. 解析目标地址的 IP 地址
-2. 查询 GeoIP 数据库获取国家代码
-3. 如果在 `direct_countries` 列表中，使用直连
-4. 如果在 `proxy_countries` 列表中，使用代理
-5. 否则使用 `default_strategy`
+**路由规则优先级**（从高到低）：
+1. **域名匹配**：检查 `direct_domains` 和 `proxy_domains`
+2. **IP/CIDR 匹配**：检查 `direct_ips` 和 `proxy_ips`
+3. **GeoIP 国家**：查询 `direct_countries` 和 `proxy_countries`
+4. **默认策略**：使用 `default_strategy`
+
+**域名通配符规则**：
+- `*.example.com` - 匹配 www.example.com、api.example.com 和 example.com
+- `.example.com` - 匹配 www.example.com 但不匹配 example.com
+- `example.com` - 仅精确匹配 example.com
+
+**IP/CIDR 格式**：
+- 单个 IP：`8.8.8.8`、`2001:4860:4860::8888`
+- CIDR 网段：`192.168.0.0/16`、`10.0.0.0/8`
+- IPv6 CIDR：`2001:db8::/32`
 
 **获取 GeoIP 数据库**：
 ```bash

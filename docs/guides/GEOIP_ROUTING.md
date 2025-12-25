@@ -118,7 +118,7 @@ geoipupdate
 
 ## 配置示例
 
-### 基础配置
+### 基础配置（仅 GeoIP）
 
 ```toml
 [[forwarders]]
@@ -130,6 +130,81 @@ bind_port = 2080
 [forwarders.routing]
 geoip_db = "GeoLite2-Country.mmdb"
 direct_countries = ["CN"]
+default_strategy = "proxy"
+```
+
+### 组合配置（GeoIP + IP + 域名）
+
+```toml
+[[forwarders]]
+name = "socks5-advanced"
+proxy_type = "socks5"
+bind_addr = "127.0.0.1"
+bind_port = 2080
+
+[forwarders.routing]
+# GeoIP 数据库
+geoip_db = "GeoLite2-Country.mmdb"
+
+# 国家级路由
+direct_countries = ["CN", "HK", "TW", "MO"]
+proxy_countries = []
+
+# IP/CIDR 级路由（优先级高于 GeoIP）
+direct_ips = [
+    "192.168.0.0/16",     # 内网
+    "10.0.0.0/8",         # 内网
+    "172.16.0.0/12",      # 内网
+    "223.5.5.5",          # 阿里 DNS
+    "119.29.29.29",       # 腾讯 DNS
+]
+proxy_ips = [
+    "8.8.8.8",            # Google DNS 强制走代理
+]
+
+# 域名级路由（优先级最高）
+direct_domains = [
+    "*.baidu.com",        # 百度所有子域名
+    "*.qq.com",           # 腾讯所有子域名
+    "*.taobao.com",       # 淘宝所有子域名
+    "*.alipay.com",       # 支付宝所有子域名
+    "example.com",        # 精确匹配
+]
+proxy_domains = [
+    "*.google.com",       # Google 所有子域名走代理
+    "*.youtube.com",      # YouTube 所有子域名走代理
+]
+
+# 默认策略
+default_strategy = "proxy"
+```
+
+### 纯域名/IP 配置（不使用 GeoIP）
+
+```toml
+[[forwarders]]
+name = "socks5-rules-only"
+proxy_type = "socks5"
+bind_addr = "127.0.0.1"
+bind_port = 2080
+
+[forwarders.routing]
+# 不配置 GeoIP 数据库
+# geoip_db = "GeoLite2-Country.mmdb"
+
+# 仅使用域名和 IP 规则
+direct_domains = [
+    "*.cn",               # 所有 .cn 域名
+    "*.baidu.com",
+    "*.qq.com",
+]
+
+direct_ips = [
+    "192.168.0.0/16",
+    "10.0.0.0/8",
+]
+
+# 其他所有流量走代理
 default_strategy = "proxy"
 ```
 
@@ -166,6 +241,69 @@ proxy_countries = ["US"]
 default_strategy = "direct"
 ```
 
+## 路由规则详解
+
+### 优先级顺序
+
+路由规则按以下顺序匹配（从高到低）：
+
+1. **域名匹配** - `direct_domains` 和 `proxy_domains`
+2. **IP/CIDR 匹配** - `direct_ips` 和 `proxy_ips`
+3. **GeoIP 国家匹配** - `direct_countries` 和 `proxy_countries`
+4. **默认策略** - `default_strategy`
+
+### 域名匹配规则
+
+**通配符 `*`**：
+```toml
+direct_domains = ["*.example.com"]
+```
+- ✅ 匹配：`www.example.com`
+- ✅ 匹配：`api.example.com`
+- ✅ 匹配：`example.com`（也匹配根域名）
+- ❌ 不匹配：`example.org`
+
+**点前缀 `.`**：
+```toml
+direct_domains = [".example.com"]
+```
+- ✅ 匹配：`www.example.com`
+- ✅ 匹配：`api.example.com`
+- ❌ 不匹配：`example.com`（不匹配根域名）
+
+**精确匹配**：
+```toml
+direct_domains = ["example.com"]
+```
+- ✅ 匹配：`example.com`
+- ❌ 不匹配：`www.example.com`
+
+### IP/CIDR 匹配规则
+
+**单个 IP**：
+```toml
+direct_ips = ["8.8.8.8", "2001:4860:4860::8888"]
+```
+
+**CIDR 网段**：
+```toml
+direct_ips = [
+    "192.168.0.0/16",      # 192.168.0.0 - 192.168.255.255
+    "10.0.0.0/8",          # 10.0.0.0 - 10.255.255.255
+    "172.16.0.0/12",       # 172.16.0.0 - 172.31.255.255
+    "2001:db8::/32",       # IPv6 网段
+]
+```
+
+### GeoIP 国家匹配
+
+使用 ISO 3166-1 alpha-2 国家代码（两字母代码）：
+
+```toml
+direct_countries = ["CN", "HK", "TW", "MO"]  # 大中华区
+proxy_countries = ["US", "GB"]                # 美国、英国
+```
+
 ## 国家代码参考
 
 常用的 ISO 3166-1 alpha-2 国家代码：
@@ -190,19 +328,60 @@ default_strategy = "direct"
 
 ## 测试路由策略
 
+### 命令行测试
+
+启动客户端后使用 curl 测试：
+
+```bash
+# Linux/macOS
+curl -x socks5h://127.0.0.1:2080 https://www.baidu.com
+curl -x socks5h://127.0.0.1:2080 https://www.google.com
+curl -x socks5://127.0.0.1:2080 http://192.168.1.1
+
+# Windows PowerShell
+$proxy = [System.Net.WebProxy]::new('socks5://127.0.0.1:2080')
+$wc = [System.Net.WebClient]::new()
+$wc.Proxy = $proxy
+$wc.DownloadString('https://www.baidu.com')
+```
+
+### 日志分析
+
 启动客户端后，日志会显示路由决策：
 
 ```
-INFO  Forwarder 'socks5-smart': GeoIP routing enabled (direct_countries: ["CN"], default: Proxy)
-INFO  Forwarder 'socks5-smart': Forwarding to target: www.baidu.com:80
+INFO  Forwarder 'socks5-smart': GeoIP routing enabled
+INFO  Forwarder 'socks5-smart': Forwarding to target: www.baidu.com:443
+DEBUG Domain www.baidu.com matches direct_domains pattern *.baidu.com -> direct
+INFO  Forwarder 'socks5-smart': Using direct connection
+
+INFO  Forwarder 'socks5-smart': Forwarding to target: 8.8.8.8:53
+DEBUG IP 8.8.8.8 matches proxy_ips -> proxy
+INFO  Forwarder 'socks5-smart': Using proxy connection
+
+INFO  Forwarder 'socks5-smart': Forwarding to target: unknown.cn:80
 DEBUG IP 111.206.xxx.xxx is from country: CN
-DEBUG Country CN is in direct_countries list, using direct connection
-INFO  Forwarder 'socks5-smart': Using direct connection for www.baidu.com:80
+DEBUG Country CN is in direct_countries list -> direct
+INFO  Forwarder 'socks5-smart': Using direct connection
+```
+
+### 调试模式
+
+启用详细日志查看完整路由决策过程：
+
+```bash
+# Linux/macOS
+export RUST_LOG=tls_tunnel=debug
+./tls-tunnel client -c config.toml
+
+# Windows
+$env:RUST_LOG="tls_tunnel=debug"
+.\tls-tunnel.exe client -c config.toml
 ```
 
 ## 故障排查
 
-### 数据库加载失败
+### 问题：数据库加载失败
 
 ```
 WARN  Failed to load GeoIP database from GeoLite2-Country.mmdb: ...
@@ -210,28 +389,46 @@ WARN  Routing will use default strategy for all addresses
 ```
 
 **解决方法**：
-1. 检查文件路径是否正确
-2. 检查文件是否存在
-3. 检查文件权限
-4. 确认文件格式是 `.mmdb`
+1. 检查文件路径是否正确（相对于配置文件目录或工作目录）
+2. 检查文件是否存在：`ls -l GeoLite2-Country.mmdb`
+3. 检查文件权限：`chmod 644 GeoLite2-Country.mmdb`
+4. 确认文件格式是 `.mmdb`（不是 v2fly .dat 格式）
 
-### 所有流量都走代理/直连
+### 问题：所有流量都走代理/直连
 
 **可能原因**：
 - 没有配置 `geoip_db` → 使用 `default_strategy`
 - 数据库加载失败 → 使用 `default_strategy`
-- 目标国家不在 `direct_countries` 或 `proxy_countries` 中 → 使用 `default_strategy`
+- 目标不匹配任何规则 → 使用 `default_strategy`
 
 **检查方法**：
-设置日志级别为 `debug`：
-```bash
-# Linux/macOS
-export RUST_LOG=debug
-./tls-tunnel client -c config.toml
+设置日志级别为 `debug` 查看匹配过程
 
-# Windows
-$env:RUST_LOG="debug"
-.\tls-tunnel.exe client -c config.toml
+### 问题：域名通配符不生效
+
+**检查配置**：
+```toml
+direct_domains = ["*.baidu.com"]  # 正确：匹配所有子域名和根域名
+direct_domains = ["*baidu.com"]   # 错误：缺少点号
+direct_domains = [".baidu.com"]   # 正确：仅匹配子域名，不匹配根域名
+```
+
+### 问题：CIDR 格式错误
+
+**正确示例**：
+```toml
+direct_ips = [
+    "192.168.0.0/16",    # 正确：CIDR 格式
+    "10.0.0.1",          # 正确：单个 IP
+]
+```
+
+**错误示例**：
+```toml
+direct_ips = [
+    "192.168.0.0-255",   # 错误：不是 CIDR 格式
+    "192.168.0.*",       # 错误：通配符不支持
+]
 ```
 
 ## 性能影响
