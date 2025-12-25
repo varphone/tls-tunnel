@@ -1,5 +1,6 @@
 mod config;
 mod connection;
+mod forwarder;
 mod stream;
 mod visitor;
 
@@ -191,6 +192,28 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
             tokio::spawn(async move {
                 if let Err(e) = run_visitor_listener(visitor_clone, stream_tx_clone).await {
                     error!("Visitor '{}' listener error: {}", visitor_name, e);
+                }
+            });
+        }
+    }
+
+    // 启动 forwarder 监听器
+    if !config.forwarders.is_empty() {
+        info!(
+            "Starting {} forwarder listeners...",
+            config.forwarders.len()
+        );
+
+        for forwarder in &config.forwarders {
+            let forwarder_clone = forwarder.clone();
+            let forwarder_name = forwarder.name.clone();
+            let stream_tx_clone = visitor_stream_tx.clone(); // 复用同一个 channel
+
+            tokio::spawn(async move {
+                if let Err(e) =
+                    forwarder::run_forwarder_listener(forwarder_clone, stream_tx_clone).await
+                {
+                    error!("Forwarder '{}' listener error: {}", forwarder_name, e);
                 }
             });
         }

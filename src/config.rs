@@ -16,6 +16,12 @@ pub enum ProxyType {
     /// HTTP/2.0（单连接多路复用）
     #[serde(rename = "http/2.0")]
     Http2,
+    /// HTTP 代理（用于 forwarder）
+    #[serde(rename = "http")]
+    HttpProxy,
+    /// SOCKS5 代理（用于 forwarder）
+    #[serde(rename = "socks5")]
+    Socks5Proxy,
 }
 
 impl ProxyType {
@@ -25,6 +31,7 @@ impl ProxyType {
             ProxyType::Tcp => false,
             ProxyType::Http11 => true,
             ProxyType::Http2 => true,
+            ProxyType::HttpProxy | ProxyType::Socks5Proxy => false,
         }
     }
 
@@ -76,6 +83,20 @@ pub struct VisitorConfig {
     pub publish_port: u16,
 }
 
+/// Forwarder 配置（客户端转发到外部网络）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwarderConfig {
+    /// Forwarder 名称
+    pub name: String,
+    /// 代理类型（http 或 socks5）
+    pub proxy_type: ProxyType,
+    /// 客户端本地绑定地址（默认 127.0.0.1）
+    #[serde(default = "default_bind_addr")]
+    pub bind_addr: String,
+    /// 客户端本地绑定端口（本地应用连接此端口）
+    pub bind_port: u16,
+}
+
 /// 服务器端配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -104,6 +125,9 @@ pub struct ServerConfig {
     /// 统计信息服务器绑定地址（可选，默认使用 bind_addr）
     #[serde(default)]
     pub stats_addr: Option<String>,
+    /// 是否允许 forward proxy 功能（默认 false）
+    #[serde(default)]
+    pub allow_forward: bool,
 }
 
 /// 客户端配置
@@ -142,6 +166,9 @@ pub struct ClientFullConfig {
     /// Visitor 配置列表（访问服务器端的服务）
     #[serde(default)]
     pub visitors: Vec<VisitorConfig>,
+    /// Forwarder 配置列表（转发到外部网络）
+    #[serde(default)]
+    pub forwarders: Vec<ForwarderConfig>,
 }
 
 impl ServerConfig {
@@ -184,8 +211,8 @@ impl ClientFullConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         use std::collections::HashSet;
 
-        if self.proxies.is_empty() && self.visitors.is_empty() {
-            anyhow::bail!("No proxy or visitor configurations defined");
+        if self.proxies.is_empty() && self.visitors.is_empty() && self.forwarders.is_empty() {
+            anyhow::bail!("No proxy, visitor, or forwarder configurations defined");
         }
 
         let mut seen_names = HashSet::new();

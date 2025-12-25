@@ -1,5 +1,6 @@
 use super::registry::ProxyRegistry;
 use super::visitor::handle_visitor_stream;
+use crate::config::ServerConfig;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -11,6 +12,7 @@ pub async fn run_yamux_connection<T>(
     mut stream_rx: mpsc::Receiver<(mpsc::Sender<yamux::Stream>, u16, String)>,
     proxy_registry: ProxyRegistry,
     _stream_tx_for_visitors: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
+    server_config: &ServerConfig,
 ) -> Result<()>
 where
     T: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin,
@@ -43,8 +45,9 @@ where
                     Some(Ok(stream)) => {
                         info!("Received visitor stream from client");
                         let proxy_registry_clone = proxy_registry.clone();
+                        let server_config_clone = server_config.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_visitor_stream(stream, proxy_registry_clone).await {
+                            if let Err(e) = handle_visitor_stream(stream, proxy_registry_clone, &server_config_clone).await {
                                 error!("Failed to handle visitor stream: {}", e);
                             }
                         });

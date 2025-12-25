@@ -10,8 +10,9 @@ use super::registry::VisitorInfo;
 pub fn validate_proxy_configs(proxies: &[ProxyInfo], server_bind_port: u16) -> Result<()> {
     use std::collections::HashSet;
 
+    // 允许空的 proxies（客户端可能只有 forwarders 配置）
     if proxies.is_empty() {
-        anyhow::bail!("No proxy configurations received from client");
+        return Ok(());
     }
 
     let mut seen_names = HashSet::new();
@@ -102,9 +103,11 @@ where
         anyhow::bail!("Unsupported protocol version {}", msg.version);
     }
 
-    if msg.proxies.is_empty() && msg.visitors.is_empty() {
-        anyhow::bail!("No proxy or visitor configurations provided");
-    }
+    // 注意：客户端可能只有 forwarders 配置（不需要发送给服务端），
+    // 此时 proxies 和 visitors 都为空是正常的
+    // if msg.proxies.is_empty() && msg.visitors.is_empty() {
+    //     anyhow::bail!("No proxy or visitor configurations provided");
+    // }
 
     let mut proxies = Vec::with_capacity(msg.proxies.len());
     for p in msg.proxies {

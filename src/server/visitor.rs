@@ -1,9 +1,77 @@
 use super::registry::ProxyRegistry;
+use crate::config::ServerConfig;
 use anyhow::{Context, Result};
+use std::net::{IpAddr, ToSocketAddrs};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, warn};
+
+/// 检查目标地址是否为本地地址（禁止访问）
+fn is_local_address(target_addr: &str) -> bool {
+    // 解析地址
+    let addr_str = if target_addr.contains(':') {
+        target_addr.to_string()
+    } else {
+        format!("{}:80", target_addr) // 添加默认端口以便解析
+    };
+
+    // 尝试解析域名/IP
+    match addr_str.to_socket_addrs() {
+        Ok(addrs) => {
+            for addr in addrs {
+                let ip = addr.ip();
+
+                // 检查是否为本地地址
+                if ip.is_loopback() {
+                    warn!("Blocked attempt to access loopback address: {}", ip);
+                    return true;
+                }
+
+                // 检查是否为私有地址（内网地址）
+                match ip {
+                    IpAddr::V4(ipv4) => {
+                        // 127.0.0.0/8 - Loopback (已被 is_loopback 覆盖)
+                        // 10.0.0.0/8 - Private
+                        // 172.16.0.0/12 - Private
+                        // 192.168.0.0/16 - Private
+                        // 169.254.0.0/16 - Link-local
+                        // 0.0.0.0/8 - Current network
+                        let octets = ipv4.octets();
+                        if octets[0] == 10
+                            || (octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31))
+                            || (octets[0] == 192 && octets[1] == 168)
+                            || (octets[0] == 169 && octets[1] == 254)
+                            || octets[0] == 0
+                        {
+                            warn!("Blocked attempt to access private IPv4 address: {}", ip);
+                            return true;
+                        }
+                    }
+                    IpAddr::V6(ipv6) => {
+                        // ::1 - Loopback (已被 is_loopback 覆盖)
+                        // fc00::/7 - Unique local address (ULA)
+                        // fe80::/10 - Link-local
+                        if ipv6.is_unique_local() || ipv6.is_unicast_link_local() {
+                            warn!("Blocked attempt to access private IPv6 address: {}", ip);
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        Err(e) => {
+            // 无法解析地址，出于安全考虑禁止访问
+            warn!(
+                "Failed to resolve target address '{}': {}. Blocking for security.",
+                target_addr, e
+            );
+            true
+        }
+    }
+}
 
 /// 发送错误消息给客户端
 async fn send_error_message<T>(stream: &mut T, message: &str) -> Result<()>
@@ -23,6 +91,7 @@ where
 pub async fn handle_visitor_stream(
     stream: yamux::Stream,
     proxy_registry: ProxyRegistry,
+    server_config: &ServerConfig,
 ) -> Result<()> {
     let mut visitor_stream = stream.compat();
 
@@ -59,6 +128,15 @@ pub async fn handle_visitor_stream(
         .await
         .context("Failed to read publish port")?;
     let publish_port = u16::from_be_bytes(port_buf);
+
+    // 检测是否为 @forward 请求
+    if let Some(target_addr) = proxy_name.strip_prefix("@forward:") {
+        info!(
+            "Visitor stream requesting forward to external target: '{}'",
+            target_addr
+        );
+        return handle_forward_request(visitor_stream, target_addr, server_config).await;
+    }
 
     info!(
         "Visitor stream requesting proxy: '{}' with publish_port {}",
@@ -150,5 +228,102 @@ pub async fn handle_visitor_stream(
     }
 
     info!("Visitor stream for proxy '{}' closed", proxy_name);
+    Ok(())
+}
+
+/// 处理 forward 请求（连接到外部目标）
+async fn handle_forward_request<T>(
+    mut visitor_stream: T,
+    target_addr: &str,
+    server_config: &ServerConfig,
+) -> Result<()>
+where
+    T: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    // 检查服务器是否允许 forward 功能
+    if !server_config.allow_forward {
+        let error_msg = "Forward feature is not enabled on server";
+        error!("{}", error_msg);
+        visitor_stream.write_all(&[0]).await.ok();
+        send_error_message(&mut visitor_stream, error_msg)
+            .await
+            .ok();
+        return Err(anyhow::anyhow!(error_msg));
+    }
+
+    // 安全检查：禁止访问本地地址和内网地址
+    if is_local_address(target_addr) {
+        let error_msg = format!(
+            "Access denied: cannot forward to local or private address '{}'",
+            target_addr
+        );
+        error!("{}", error_msg);
+        visitor_stream.write_all(&[0]).await.ok();
+        send_error_message(&mut visitor_stream, &error_msg)
+            .await
+            .ok();
+        return Err(anyhow::anyhow!(error_msg));
+    }
+
+    info!("Attempting to connect to external target: {}", target_addr);
+
+    // 连接到外部目标
+    let external_stream = match TcpStream::connect(target_addr).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            let error_msg = format!("Failed to connect to {}: {}", target_addr, e);
+            error!("{}", error_msg);
+            visitor_stream.write_all(&[0]).await.ok();
+            send_error_message(&mut visitor_stream, &error_msg)
+                .await
+                .ok();
+            return Err(anyhow::anyhow!(error_msg));
+        }
+    };
+
+    info!("Successfully connected to external target: {}", target_addr);
+
+    // 发送确认给 visitor 客户端
+    visitor_stream
+        .write_all(&[1])
+        .await
+        .context("Failed to send confirmation")?;
+    visitor_stream.flush().await?;
+
+    info!(
+        "Forward connection confirmed, starting bidirectional data transfer with {}",
+        target_addr
+    );
+
+    // 双向转发数据：visitor客户端 ↔ 服务器 ↔ 外部目标
+    let (mut visitor_read, mut visitor_write) = tokio::io::split(visitor_stream);
+    let (mut external_read, mut external_write) = tokio::io::split(external_stream);
+
+    let visitor_to_external = async {
+        tokio::io::copy(&mut visitor_read, &mut external_write).await?;
+        external_write.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    let external_to_visitor = async {
+        tokio::io::copy(&mut external_read, &mut visitor_write).await?;
+        visitor_write.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    tokio::select! {
+        result = visitor_to_external => {
+            if let Err(e) = result {
+                warn!("Forward '{}': Visitor to external copy error: {}", target_addr, e);
+            }
+        }
+        result = external_to_visitor => {
+            if let Err(e) = result {
+                warn!("Forward '{}': External to visitor copy error: {}", target_addr, e);
+            }
+        }
+    }
+
+    info!("Forward connection to '{}' closed", target_addr);
     Ok(())
 }

@@ -6,7 +6,11 @@ use tokio::net::TcpListener;
 use tracing::{error, info};
 
 /// 启动统计数据 HTTP 服务器
-pub async fn start_stats_server(bind_addr: String, port: u16, stats_manager: StatsManager) -> Result<()> {
+pub async fn start_stats_server(
+    bind_addr: String,
+    port: u16,
+    stats_manager: StatsManager,
+) -> Result<()> {
     let listener = TcpListener::bind(format!("{}:{}", bind_addr, port))
         .await
         .context("Failed to bind stats server port")?;

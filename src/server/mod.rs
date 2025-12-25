@@ -42,20 +42,26 @@ pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Resu
     if let Some(stats_port) = config.stats_port {
         // 使用 stats_addr，如果未配置则回退到 bind_addr
         // validate() 已确保 bind_addr 和 stats_addr（如果存在）都不为空
-        let stats_addr = config.stats_addr
+        let stats_addr = config
+            .stats_addr
             .as_ref()
             .filter(|s| !s.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| config.bind_addr.clone());
-        
+
         let stats_manager_clone = stats_manager.clone();
         let stats_addr_clone = stats_addr.clone();
         tokio::spawn(async move {
-            if let Err(e) = start_stats_server(stats_addr_clone, stats_port, stats_manager_clone).await {
+            if let Err(e) =
+                start_stats_server(stats_addr_clone, stats_port, stats_manager_clone).await
+            {
                 error!("Stats server error: {}", e);
             }
         });
-        info!("Stats server will listen on http://{}:{}", stats_addr, stats_port);
+        info!(
+            "Stats server will listen on http://{}:{}",
+            stats_addr, stats_port
+        );
     }
 
     // 创建传输层服务器
@@ -209,12 +215,14 @@ async fn handle_client_transport(
     let shutdown_tx_clone = shutdown_tx.clone();
     let proxy_registry_for_visitor = proxy_registry.clone();
     let stream_tx_clone = stream_tx.clone();
+    let server_config_clone = config.clone();
     tokio::spawn(async move {
         let result = run_yamux_connection(
             yamux_conn,
             stream_rx,
             proxy_registry_for_visitor,
             stream_tx_clone,
+            &server_config_clone,
         )
         .await;
         if let Err(e) = &result {
