@@ -112,40 +112,33 @@ pub async fn handle_proxy_connection(
     let mut inbound_read = inbound_read.compat();
     let mut inbound_write = inbound_write.compat_write();
 
-    // 跟踪inbound到stream的字节数（发送到客户端）
+    // 跟踪inbound到stream的字节数（外部客户端 → 服务器 → 内网客户端：服务器接收的数据）
     let tracker_clone = tracker.clone();
     let inbound_to_stream = async move {
         let result = futures::io::copy(&mut inbound_read, &mut stream_write).await;
         if let Ok(bytes) = result {
-            tracker_clone.add_bytes_sent(bytes);
-            Ok(bytes)
-        } else {
-            result
+            tracker_clone.add_bytes_received(bytes);
         }
+        result
     };
 
-    // 跟踪stream到inbound的字节数（从客户端接收）
+    // 跟踪stream到inbound的字节数（内网客户端 → 服务器 → 外部客户端：服务器发送的数据）
     let stream_to_inbound = async move {
         let result = futures::io::copy(&mut stream_read, &mut inbound_write).await;
         if let Ok(bytes) = result {
-            tracker.add_bytes_received(bytes);
-            Ok(bytes)
-        } else {
-            result
+            tracker.add_bytes_sent(bytes);
         }
+        result
     };
 
-    tokio::select! {
-        result = inbound_to_stream => {
-            if let Err(e) = result {
-                warn!("Error copying inbound to stream: {}", e);
-            }
-        }
-        result = stream_to_inbound => {
-            if let Err(e) = result {
-                warn!("Error copying stream to inbound: {}", e);
-            }
-        }
+    // 使用 join! 而不是 select!，确保两个方向都完成传输
+    let (result1, result2) = tokio::join!(inbound_to_stream, stream_to_inbound);
+    
+    if let Err(e) = result1 {
+        warn!("Error copying inbound to stream: {}", e);
+    }
+    if let Err(e) = result2 {
+        warn!("Error copying stream to inbound: {}", e);
     }
 
     info!("Connection closed for proxy '{}'", proxy_name);
