@@ -7,7 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::config::read_error_message;
 use super::geoip::GeoIpRouter;
@@ -441,7 +441,29 @@ fn format_proxy_type(proxy_type: ProxyType) -> &'static str {
 fn is_unsafe_direct_target(target: &str) -> bool {
     use std::net::{IpAddr, ToSocketAddrs};
 
-    // 解析地址
+    // 提取主机名部分（移除端口）
+    let host = if let Some(colon_pos) = target.rfind(':') {
+        // 检查是否为 IPv6 地址（包含多个冒号）
+        if target.matches(':').count() > 1 {
+            // IPv6 地址，查找方括号
+            if let Some(bracket_end) = target.find(']') {
+                &target[1..bracket_end] // [ipv6]:port -> ipv6
+            } else {
+                target // 纯 IPv6 地址
+            }
+        } else {
+            &target[..colon_pos] // host:port -> host
+        }
+    } else {
+        target
+    };
+
+    // 检查是否为明确的本地主机名（完全匹配）
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return true;
+    }
+
+    // 解析地址（添加端口以便解析）
     let addr_str = if target.contains(':') {
         target.to_string()
     } else {
@@ -483,9 +505,14 @@ fn is_unsafe_direct_target(target: &str) -> bool {
             }
             false
         }
-        Err(_) => {
-            // 无法解析地址，出于安全考虑禁止访问
-            true
+        Err(e) => {
+            // DNS 解析失败可能是临时问题，不应该直接拒绝
+            // 记录警告信息，让连接尝试继续（连接失败会有自己的错误处理）
+            debug!(
+                "Failed to resolve address '{}' for safety check: {}. Allowing connection attempt.",
+                target, e
+            );
+            false
         }
     }
 }

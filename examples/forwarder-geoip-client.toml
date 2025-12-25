@@ -18,7 +18,7 @@ transport = "tls"
 name = "socks5-proxy-smart"
 proxy_type = "socks5"
 bind_addr = "127.0.0.1"
-bind_port = 1080
+bind_port = 2080
 
 # GeoIP routing configuration
 [forwarders.routing]
@@ -30,7 +30,7 @@ bind_port = 1080
 #   Download geoip.dat: https://github.com/v2fly/geoip/releases
 #   Convert using: https://github.com/varphone/geoip/tree/dev
 #   Command: ./geoip convert geoip.dat Country.mmdb
-geoip_db = "Country.mmdb"
+geoip_db = "examples/geoip.mmdb"
 
 # List of countries that should use direct connection (ISO 3166-1 alpha-2 codes)
 # CN = China, HK = Hong Kong, TW = Taiwan, MO = Macau
@@ -73,5 +73,5 @@ default_strategy = "proxy"
 name = "http-proxy"
 proxy_type = "http"
 bind_addr = "127.0.0.1"
-bind_port = 8080
+bind_port = 9080
 # No routing configuration = always use proxy
