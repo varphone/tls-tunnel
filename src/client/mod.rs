@@ -1,6 +1,7 @@
 mod config;
 mod connection;
 mod forwarder;
+mod geoip;
 mod stream;
 mod visitor;
 
@@ -204,14 +205,40 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
             config.forwarders.len()
         );
 
+        // 为每个 forwarder 创建对应的 GeoIP 路由器
         for forwarder in &config.forwarders {
             let forwarder_clone = forwarder.clone();
             let forwarder_name = forwarder.name.clone();
             let stream_tx_clone = visitor_stream_tx.clone(); // 复用同一个 channel
 
+            // 如果配置了路由策略，创建 GeoIP 路由器
+            let router = if let Some(ref routing_config) = forwarder.routing {
+                match geoip::GeoIpRouter::new(routing_config.clone()) {
+                    Ok(router) => {
+                        info!(
+                            "Forwarder '{}': GeoIP routing enabled (direct_countries: {:?}, default: {:?})",
+                            forwarder_name,
+                            routing_config.direct_countries,
+                            routing_config.default_strategy
+                        );
+                        Some(Arc::new(router))
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Forwarder '{}': Failed to initialize GeoIP router: {}. All traffic will use proxy.",
+                            forwarder_name, e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             tokio::spawn(async move {
                 if let Err(e) =
-                    forwarder::run_forwarder_listener(forwarder_clone, stream_tx_clone).await
+                    forwarder::run_forwarder_listener(forwarder_clone, stream_tx_clone, router)
+                        .await
                 {
                     error!("Forwarder '{}' listener error: {}", forwarder_name, e);
                 }

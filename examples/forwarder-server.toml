@@ -1,0 +1,26 @@
+# Forward Proxy Server Configuration
+# This server allows forward proxy connections from clients
+
+[server]
+bind_addr = "0.0.0.0"
+bind_port = 8443
+auth_key = "your-secret-key-here"
+
+# TLS certificate and key
+cert_path = "examples/certs/cert.pem"
+key_path = "examples/certs/key.pem"
+
+# Transport protocol: "tls", "wss", or "http2"
+transport = "tls"
+
+# IMPORTANT: Enable forward proxy feature
+# Set to true to allow clients to use HTTP/SOCKS5 proxy features
+# When enabled, clients can forward traffic to external targets
+allow_forward = true
+
+# Statistics server (optional)
+stats_addr = "127.0.0.1"
+stats_port = 8081
+
+# Server can also accept regular proxy registrations
+# Clients can register proxies and visitors alongside forwarders

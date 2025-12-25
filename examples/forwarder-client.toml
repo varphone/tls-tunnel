@@ -1,0 +1,41 @@
+# HTTP/SOCKS5 Forward Proxy Client Configuration
+# This client connects to the server and provides HTTP and SOCKS5 proxy services locally
+
+[client]
+server_addr = "127.0.0.1"
+server_port = 3080
+auth_key = "test-secret-key-12345"
+
+# Skip certificate verification (for testing with self-signed certs)
+skip_verify = true
+
+# Transport protocol: "tls", "wss", or "http2"
+transport = "tls"
+
+# HTTP Proxy Forwarder
+# Listen on localhost:8080 for HTTP CONNECT requests
+[[forwarders]]
+name = "http-proxy"
+proxy_type = "http"
+bind_addr = "127.0.0.1"
+bind_port = 8080
+
+# SOCKS5 Proxy Forwarder
+# Listen on localhost:1080 for SOCKS5 requests
+[[forwarders]]
+name = "socks5-proxy"
+proxy_type = "socks5"
+bind_addr = "127.0.0.1"
+bind_port = 1080
+
+# You can also mix forwarders with regular proxies and visitors
+# [[proxies]]
+# name = "web"
+# local_port = 8000
+# publish_port = 8000
+
+# [[visitors]]
+# name = "api"
+# bind_addr = "127.0.0.1"
+# bind_port = 9000
+# publish_port = 9000

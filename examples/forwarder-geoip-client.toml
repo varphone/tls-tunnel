@@ -1,0 +1,51 @@
+# Forward Proxy Client Configuration with GeoIP Routing
+# This client uses GeoIP database to route traffic intelligently
+
+[client]
+server_addr = "127.0.0.1"
+server_port = 3080
+auth_key = "test-secret-key-12345"
+
+# Skip certificate verification (for testing with self-signed certs)
+skip_verify = true
+
+# Transport protocol: "tls", "wss", or "http2"
+transport = "tls"
+
+# SOCKS5 Proxy Forwarder with GeoIP routing
+# China IP addresses will connect directly, others will go through the tunnel
+[[forwarders]]
+name = "socks5-proxy-smart"
+proxy_type = "socks5"
+bind_addr = "127.0.0.1"
+bind_port = 2080
+
+# GeoIP routing configuration
+[forwarders.routing]
+# Path to GeoIP Country database (mmdb format)
+# Option 1: MaxMind GeoLite2 (official, requires free account)
+#   Download: https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+#   Use: GeoLite2-Country.mmdb
+# Option 2: v2fly/geoip (community, better for China, needs conversion)
+#   Download geoip.dat: https://github.com/v2fly/geoip/releases
+#   Convert using: https://github.com/varphone/geoip/tree/dev
+#   Command: ./geoip convert geoip.dat Country.mmdb
+geoip_db = "Country.mmdb"
+
+# List of countries that should use direct connection (ISO 3166-1 alpha-2 codes)
+# CN = China, HK = Hong Kong, TW = Taiwan, MO = Macau
+direct_countries = ["CN", "HK", "TW", "MO"]
+
+# List of countries that must use proxy (empty = use default strategy)
+proxy_countries = []
+
+# Default strategy for countries not in any list: "direct" or "proxy"
+default_strategy = "proxy"
+
+# HTTP Proxy Forwarder without routing (always use proxy)
+[[forwarders]]
+name = "http-proxy"
+proxy_type = "http"
+bind_addr = "127.0.0.1"
+bind_port = 9080
+# No routing configuration = always use proxy

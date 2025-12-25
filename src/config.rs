@@ -95,6 +95,39 @@ pub struct ForwarderConfig {
     pub bind_addr: String,
     /// 客户端本地绑定端口（本地应用连接此端口）
     pub bind_port: u16,
+    /// 路由策略（可选）
+    #[serde(default)]
+    pub routing: Option<RoutingConfig>,
+}
+
+/// 路由策略配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    /// GeoIP 数据库路径（.mmdb 文件）
+    pub geoip_db: Option<String>,
+    /// 直连国家列表（ISO 3166-1 alpha-2 代码，如 "CN", "US"）
+    #[serde(default)]
+    pub direct_countries: Vec<String>,
+    /// 通过代理的国家列表（为空表示其他所有国家）
+    #[serde(default)]
+    pub proxy_countries: Vec<String>,
+    /// 默认策略：direct（直连）或 proxy（代理），默认 proxy
+    #[serde(default = "default_routing_strategy")]
+    pub default_strategy: RoutingStrategy,
+}
+
+/// 路由策略
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingStrategy {
+    /// 直接连接
+    Direct,
+    /// 通过代理
+    Proxy,
+}
+
+fn default_routing_strategy() -> RoutingStrategy {
+    RoutingStrategy::Proxy
 }
 
 /// 服务器端配置

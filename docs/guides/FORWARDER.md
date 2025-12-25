@@ -246,6 +246,62 @@ bind_port = 1080
 
 这种配置适用于只需要正向代理功能的场景。
 
+### 基于 GeoIP 的智能路由
+
+使用 GeoIP 数据库实现智能路由，根据目标 IP 的地理位置决定是直连还是走代理：
+
+```toml
+[[forwarders]]
+name = "socks5-proxy-smart"
+proxy_type = "socks5"
+bind_addr = "127.0.0.1"
+bind_port = 2080
+
+# GeoIP 路由配置
+[forwarders.routing]
+# GeoIP 数据库路径（MaxMind GeoLite2 Country）
+geoip_db = "GeoLite2-Country.mmdb"
+
+# 直连国家列表（ISO 3166-1 alpha-2 代码）
+direct_countries = ["CN", "HK", "TW", "MO"]
+
+# 代理国家列表（为空表示其他所有国家）
+proxy_countries = []
+
+# 默认策略："direct" 或 "proxy"
+default_strategy = "proxy"
+```
+
+**工作原理**：
+1. 解析目标地址的 IP 地址
+2. 查询 GeoIP 数据库获取国家代码
+3. 如果在 `direct_countries` 列表中，使用直连
+4. 如果在 `proxy_countries` 列表中，使用代理
+5. 否则使用 `default_strategy`
+
+**获取 GeoIP 数据库**：
+```bash
+# 方式 1: MaxMind GeoLite2-Country（官方，需注册免费账号）
+# 访问：https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+# 下载 GeoLite2-Country.mmdb
+
+# 方式 2: v2fly/geoip（社区版，需转换）
+# 下载 geoip.dat：https://github.com/v2fly/geoip/releases
+# 使用转换工具：https://github.com/varphone/geoip/tree/dev
+# 转换命令：./geoip --input v2rayGeoIPDat --inputFile geoip.dat --output maxmindMMDB --outputFile geoip.mmdb
+```
+
+**使用场景**：
+- ✅ 国内 IP 直连（速度快，延迟低）
+- ✅ 国外 IP 走代理（绕过限制）
+- ✅ 节省代理服务器带宽
+- ✅ 提高访问速度
+
+**注意事项**：
+- 如果未配置 `geoip_db` 或数据库加载失败，将使用 `default_strategy`
+- 如果目标是域名，会先解析为 IP 再查询地理位置
+- 建议定期更新 GeoIP 数据库以保持准确性
+
 ## 安全注意事项
 
 ### 1. 绑定地址

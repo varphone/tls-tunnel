@@ -1,5 +1,6 @@
 use crate::config::{ForwarderConfig, ProxyType};
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Duration};
@@ -7,12 +8,14 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, warn};
 
 use super::config::read_error_message;
+use super::geoip::GeoIpRouter;
 
 /// 运行 forwarder 监听器
 /// 在客户端本地监听端口，接受连接后解析目标地址并通过 yamux 转发到服务器
 pub async fn run_forwarder_listener(
     forwarder: ForwarderConfig,
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    router: Option<Arc<GeoIpRouter>>,
 ) -> Result<()> {
     let bind_addr = format!("{}:{}", forwarder.bind_addr, forwarder.bind_port);
 
@@ -39,11 +42,16 @@ pub async fn run_forwarder_listener(
 
                 let forwarder_clone = forwarder.clone();
                 let stream_tx_clone = stream_tx.clone();
+                let router_clone = router.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_forwarder_connection(local_stream, &forwarder_clone, stream_tx_clone)
-                            .await
+                    if let Err(e) = handle_forwarder_connection(
+                        local_stream,
+                        &forwarder_clone,
+                        stream_tx_clone,
+                        router_clone,
+                    )
+                    .await
                     {
                         error!(
                             "Forwarder '{}' connection handling error: {}",
@@ -61,11 +69,12 @@ pub async fn run_forwarder_listener(
 }
 
 /// 处理 forwarder 连接
-/// 根据协议类型解析目标地址，然后通过 yamux stream 转发到服务器
+/// 根据协议类型解析目标地址，然后通过 yamux stream 转发到服务器或直连
 async fn handle_forwarder_connection(
     mut local_stream: TcpStream,
     forwarder: &ForwarderConfig,
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    router: Option<Arc<GeoIpRouter>>,
 ) -> Result<()> {
     // 1. 根据 proxy_type 解析目标地址
     let target = match forwarder.proxy_type {
@@ -82,7 +91,26 @@ async fn handle_forwarder_connection(
         forwarder.name, target
     );
 
-    // 2. 请求创建新的 yamux stream
+    // 2. 判断是否应该直连
+    let should_direct = router
+        .as_ref()
+        .map(|r| r.should_direct_connect(&target))
+        .unwrap_or(false);
+
+    if should_direct {
+        info!(
+            "Forwarder '{}': Using direct connection for {}",
+            forwarder.name, target
+        );
+        return handle_direct_connection(local_stream, &target, &forwarder.name).await;
+    }
+
+    info!(
+        "Forwarder '{}': Using proxy connection for {}",
+        forwarder.name, target
+    );
+
+    // 3. 请求创建新的 yamux stream
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     stream_tx
         .send(response_tx)
@@ -344,4 +372,68 @@ fn format_proxy_type(proxy_type: ProxyType) -> &'static str {
         ProxyType::Socks5Proxy => "SOCKS5 proxy",
         _ => "Unknown",
     }
+}
+
+/// 处理直连（不通过服务器）
+async fn handle_direct_connection(
+    mut local_stream: TcpStream,
+    target: &str,
+    forwarder_name: &str,
+) -> Result<()> {
+    // 直接连接目标服务器
+    let mut remote_stream = match TcpStream::connect(target).await {
+        Ok(stream) => {
+            info!(
+                "Forwarder '{}': Successfully connected directly to {}",
+                forwarder_name, target
+            );
+            stream
+        }
+        Err(e) => {
+            error!(
+                "Forwarder '{}': Failed to connect directly to {}: {}",
+                forwarder_name, target, e
+            );
+            return Err(anyhow::anyhow!(
+                "Failed to connect directly to {}: {}",
+                target,
+                e
+            ));
+        }
+    };
+
+    // 双向转发数据
+    let (mut local_read, mut local_write) = local_stream.split();
+    let (mut remote_read, mut remote_write) = remote_stream.split();
+
+    let client_to_remote = async {
+        tokio::io::copy(&mut local_read, &mut remote_write).await?;
+        remote_write.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    let remote_to_client = async {
+        tokio::io::copy(&mut remote_read, &mut local_write).await?;
+        local_write.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    tokio::select! {
+        result = client_to_remote => {
+            if let Err(e) = result {
+                warn!("Forwarder '{}' direct: Client to remote error: {}", forwarder_name, e);
+            }
+        }
+        result = remote_to_client => {
+            if let Err(e) = result {
+                warn!("Forwarder '{}' direct: Remote to client error: {}", forwarder_name, e);
+            }
+        }
+    }
+
+    info!(
+        "Forwarder '{}': Direct connection to {} closed",
+        forwarder_name, target
+    );
+    Ok(())
 }
