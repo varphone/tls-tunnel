@@ -1,6 +1,6 @@
 use crate::config::{RoutingConfig, RoutingStrategy};
 use anyhow::Result;
-use maxminddb::{geoip2, MaxMindDBError, Reader};
+use maxminddb::{geoip2, Reader};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -224,13 +224,16 @@ impl GeoIpRouter {
         &self,
         reader: &Reader<Vec<u8>>,
         ip: IpAddr,
-    ) -> Result<Option<String>, MaxMindDBError> {
-        let country: geoip2::Country = reader.lookup(ip)?;
+    ) -> Result<Option<String>> {
+        // maxminddb 0.27: 使用 decode() 方法从 LookupResult 反序列化
+        let lookup_result = reader.lookup(ip)?;
+        let country_opt: Option<geoip2::Country> = lookup_result.decode()?;
 
-        Ok(country
-            .country
-            .and_then(|c| c.iso_code)
-            .map(|s| s.to_uppercase()))
+        Ok(country_opt.and_then(|country| {
+            // maxminddb 0.27: country 字段现在是 Country 结构体，不再是 Option
+            // iso_code 字段是 Option<&str>
+            country.country.iso_code.map(|s| s.to_uppercase())
+        }))
     }
 }
 
