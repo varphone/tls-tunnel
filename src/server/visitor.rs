@@ -5,8 +5,12 @@ use std::net::{IpAddr, ToSocketAddrs};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::Duration;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, warn};
+
+/// 服务器端读取客户端请求的超时时间（防止慢速攻击）
+const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 检查目标地址是否为本地地址（禁止访问）
 fn is_local_address(target_addr: &str) -> bool {
@@ -93,41 +97,53 @@ pub async fn handle_visitor_stream(
     proxy_registry: ProxyRegistry,
     server_config: &ServerConfig,
 ) -> Result<()> {
+    use tokio::time::timeout;
+
     let mut visitor_stream = stream.compat();
 
-    // 读取目标 proxy 名称
-    let mut name_len_buf = [0u8; 2];
-    visitor_stream
-        .read_exact(&mut name_len_buf)
-        .await
-        .context("Failed to read proxy name length")?;
-    let name_len = u16::from_be_bytes(name_len_buf) as usize;
-
-    if name_len == 0 || name_len > 256 {
-        let error_msg = "Invalid proxy name length";
-        error!("{}", error_msg);
-        visitor_stream.write_all(&[0]).await.ok();
-        send_error_message(&mut visitor_stream, error_msg)
+    // 使用超时包装读取操作（防止慢速攻击）
+    let (proxy_name, publish_port) = timeout(CLIENT_REQUEST_TIMEOUT, async {
+        // 读取目标 proxy 名称
+        let mut name_len_buf = [0u8; 2];
+        visitor_stream
+            .read_exact(&mut name_len_buf)
             .await
-            .ok();
-        return Err(anyhow::anyhow!(error_msg));
-    }
+            .context("Failed to read proxy name length")?;
+        let name_len = u16::from_be_bytes(name_len_buf) as usize;
 
-    let mut name_buf = vec![0u8; name_len];
-    visitor_stream
-        .read_exact(&mut name_buf)
-        .await
-        .context("Failed to read proxy name")?;
+        if name_len == 0 || name_len > 64 {
+            let error_msg = "Invalid proxy name length (must be 1-64 bytes)";
+            error!("{}", error_msg);
+            visitor_stream.write_all(&[0]).await.ok();
+            send_error_message(&mut visitor_stream, error_msg)
+                .await
+                .ok();
+            return Err(anyhow::anyhow!(error_msg));
+        }
 
-    let proxy_name = String::from_utf8(name_buf).context("Invalid UTF-8 in proxy name")?;
+        let mut name_buf = vec![0u8; name_len];
+        visitor_stream
+            .read_exact(&mut name_buf)
+            .await
+            .context("Failed to read proxy name")?;
 
-    // 读取目标 publish_port
-    let mut port_buf = [0u8; 2];
-    visitor_stream
-        .read_exact(&mut port_buf)
-        .await
-        .context("Failed to read publish port")?;
-    let publish_port = u16::from_be_bytes(port_buf);
+        let proxy_name = String::from_utf8(name_buf).context("Invalid UTF-8 in proxy name")?;
+
+        // 读取目标 publish_port
+        let mut port_buf = [0u8; 2];
+        visitor_stream
+            .read_exact(&mut port_buf)
+            .await
+            .context("Failed to read publish port")?;
+        let publish_port = u16::from_be_bytes(port_buf);
+
+        Ok::<(String, u16), anyhow::Error>((proxy_name, publish_port))
+    })
+    .await
+    .map_err(|_| {
+        error!("Visitor stream request timeout after {:?}", CLIENT_REQUEST_TIMEOUT);
+        anyhow::anyhow!("Client request timeout")
+    })??;
 
     // 检测是否为 @forward 请求
     if let Some(target_addr) = proxy_name.strip_prefix("@forward:") {

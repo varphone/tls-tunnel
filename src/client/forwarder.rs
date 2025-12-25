@@ -3,12 +3,19 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, warn};
 
 use super::config::read_error_message;
 use super::geoip::GeoIpRouter;
+
+/// 每个 forwarder 的最大并发连接数（防止 DoS 攻击）
+const MAX_CONCURRENT_CONNECTIONS: usize = 1000;
+
+/// 协议解析超时时间（防止慢速攻击）
+const PROTOCOL_PARSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 运行 forwarder 监听器
 /// 在客户端本地监听端口，接受连接后解析目标地址并通过 yamux 转发到服务器
@@ -32,9 +39,30 @@ pub async fn run_forwarder_listener(
 
     info!("Forwarder '{}': Listening on {}", forwarder.name, bind_addr);
 
+    // 创建信号量限制并发连接数
+    let connection_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    info!(
+        "Forwarder '{}': Maximum concurrent connections: {}",
+        forwarder.name, MAX_CONCURRENT_CONNECTIONS
+    );
+
     loop {
         match listener.accept().await {
             Ok((local_stream, peer_addr)) => {
+                // 尝试获取连接许可
+                let permit = match connection_limiter.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn!(
+                            "Forwarder '{}': Connection limit reached ({}), rejecting connection from {}",
+                            forwarder.name, MAX_CONCURRENT_CONNECTIONS, peer_addr
+                        );
+                        // 直接关闭连接
+                        drop(local_stream);
+                        continue;
+                    }
+                };
+
                 info!(
                     "Forwarder '{}': Accepted connection from {}",
                     forwarder.name, peer_addr
@@ -45,6 +73,8 @@ pub async fn run_forwarder_listener(
                 let router_clone = router.clone();
 
                 tokio::spawn(async move {
+                    // 持有 permit 直到任务结束，自动释放
+                    let _permit = permit;
                     if let Err(e) = handle_forwarder_connection(
                         local_stream,
                         &forwarder_clone,
@@ -76,6 +106,12 @@ async fn handle_forwarder_connection(
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     router: Option<Arc<GeoIpRouter>>,
 ) -> Result<()> {
+    // 获取客户端地址用于审计日志
+    let peer_addr = local_stream
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
     // 1. 根据 proxy_type 解析目标地址
     let target = match forwarder.proxy_type {
         ProxyType::HttpProxy => parse_http_connect(&mut local_stream).await?,
@@ -86,29 +122,25 @@ async fn handle_forwarder_connection(
         ),
     };
 
-    info!(
-        "Forwarder '{}': Forwarding to target: {}",
-        forwarder.name, target
-    );
-
     // 2. 判断是否应该直连
     let should_direct = router
         .as_ref()
         .map(|r| r.should_direct_connect(&target))
         .unwrap_or(false);
 
+    // 审计日志：记录连接详情和路由决策
     if should_direct {
         info!(
-            "Forwarder '{}': Using direct connection for {}",
-            forwarder.name, target
+            "Forwarder '{}': Connection from {} to {} -> DIRECT (bypassing proxy)",
+            forwarder.name, peer_addr, target
         );
         return handle_direct_connection(local_stream, &target, &forwarder.name).await;
+    } else {
+        info!(
+            "Forwarder '{}': Connection from {} to {} -> PROXY (via server)",
+            forwarder.name, peer_addr, target
+        );
     }
-
-    info!(
-        "Forwarder '{}': Using proxy connection for {}",
-        forwarder.name, target
-    );
 
     // 3. 请求创建新的 yamux stream
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -224,41 +256,52 @@ async fn handle_forwarder_connection(
 /// 解析 HTTP CONNECT 请求
 /// 格式：CONNECT example.com:443 HTTP/1.1
 async fn parse_http_connect(stream: &mut TcpStream) -> Result<String> {
-    let mut buffer = Vec::new();
-    let mut temp = [0u8; 1];
+    use tokio::time::timeout;
 
-    // 读取到第一个 \r\n\r\n
-    loop {
-        stream.read_exact(&mut temp).await?;
-        buffer.push(temp[0]);
+    // 使用超时包装整个解析过程
+    let result = timeout(PROTOCOL_PARSE_TIMEOUT, async {
+        let mut buffer = Vec::new();
+        let mut temp = [0u8; 1];
 
-        if buffer.len() >= 4 && &buffer[buffer.len() - 4..] == b"\r\n\r\n" {
-            break;
+        // 读取到第一个 \r\n\r\n
+        loop {
+            stream.read_exact(&mut temp).await?;
+            buffer.push(temp[0]);
+
+            if buffer.len() >= 4 && &buffer[buffer.len() - 4..] == b"\r\n\r\n" {
+                break;
+            }
+
+            // 防止超长请求
+            if buffer.len() > 8192 {
+                anyhow::bail!("HTTP request too long");
+            }
         }
 
-        // 防止超长请求
-        if buffer.len() > 8192 {
-            anyhow::bail!("HTTP request too long");
+        let request = String::from_utf8_lossy(&buffer);
+        let first_line = request
+            .lines()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Empty HTTP request"))?;
+
+        // 解析：CONNECT example.com:443 HTTP/1.1
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            anyhow::bail!("Invalid HTTP CONNECT request");
         }
-    }
 
-    let request = String::from_utf8_lossy(&buffer);
-    let first_line = request
-        .lines()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Empty HTTP request"))?;
+        if parts[0] != "CONNECT" {
+            anyhow::bail!("Only CONNECT method is supported");
+        }
 
-    // 解析：CONNECT example.com:443 HTTP/1.1
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-    if parts.len() < 2 {
-        anyhow::bail!("Invalid HTTP CONNECT request");
-    }
+        let target = parts[1].to_string();
 
-    if parts[0] != "CONNECT" {
-        anyhow::bail!("Only CONNECT method is supported");
-    }
+        Ok::<String, anyhow::Error>(target)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("HTTP CONNECT parsing timeout after {:?}", PROTOCOL_PARSE_TIMEOUT))??;
 
-    let target = parts[1].to_string();
+    let target = result;
 
     // 验证目标地址格式
     if !target.contains(':') {
@@ -275,94 +318,107 @@ async fn parse_http_connect(stream: &mut TcpStream) -> Result<String> {
 
 /// 解析 SOCKS5 请求
 async fn parse_socks5(stream: &mut TcpStream) -> Result<String> {
-    // SOCKS5 握手 - 读取客户端方法选择
-    let mut header = [0u8; 2];
-    stream.read_exact(&mut header).await?;
+    use tokio::time::timeout;
 
-    if header[0] != 0x05 {
-        anyhow::bail!("Unsupported SOCKS version: {}", header[0]);
-    }
+    // 使用超时包装整个解析过程
+    let result = timeout(PROTOCOL_PARSE_TIMEOUT, async {
+        // SOCKS5 握手 - 读取客户端方法选择
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header).await?;
 
-    let nmethods = header[1] as usize;
-    if nmethods == 0 || nmethods > 255 {
-        anyhow::bail!("Invalid number of methods: {}", nmethods);
-    }
+        if header[0] != 0x05 {
+            anyhow::bail!("Unsupported SOCKS version: {}", header[0]);
+        }
 
-    // 读取方法列表
-    let mut methods = vec![0u8; nmethods];
-    stream.read_exact(&mut methods).await?;
+        let nmethods = header[1] as usize;
+        if nmethods == 0 || nmethods > 255 {
+            anyhow::bail!("Invalid number of methods: {}", nmethods);
+        }
 
-    // 响应：选择无认证方法 (0x00)
-    let response = [0x05, 0x00];
-    stream.write_all(&response).await?;
-    stream.flush().await?;
+        // 读取方法列表
+        let mut methods = vec![0u8; nmethods];
+        stream.read_exact(&mut methods).await?;
 
-    // 读取 SOCKS5 请求
-    let mut request = [0u8; 4];
-    stream.read_exact(&mut request).await?;
-
-    if request[0] != 0x05 {
-        anyhow::bail!("Invalid SOCKS5 request version");
-    }
-
-    let cmd = request[1];
-    if cmd != 0x01 {
-        // 只支持 CONNECT 命令
-        let response = [0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]; // Command not supported
+        // 响应：选择无认证方法 (0x00)
+        let response = [0x05, 0x00];
         stream.write_all(&response).await?;
-        anyhow::bail!("Unsupported SOCKS5 command: {}", cmd);
-    }
+        stream.flush().await?;
 
-    let atyp = request[3];
+        // 读取 SOCKS5 请求
+        let mut request = [0u8; 4];
+        stream.read_exact(&mut request).await?;
 
-    // 解析目标地址
-    let host = match atyp {
-        0x01 => {
-            // IPv4
-            let mut addr = [0u8; 4];
-            stream.read_exact(&mut addr).await?;
-            format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
+        if request[0] != 0x05 {
+            anyhow::bail!("Invalid SOCKS5 request version");
         }
-        0x03 => {
-            // 域名
-            let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await?;
-            let len = len[0] as usize;
 
-            let mut domain = vec![0u8; len];
-            stream.read_exact(&mut domain).await?;
-            String::from_utf8(domain)?
+        let cmd = request[1];
+        if cmd != 0x01 {
+            // 只支持 CONNECT 命令
+            let response = [0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]; // Command not supported
+            stream.write_all(&response).await?;
+            anyhow::bail!("Unsupported SOCKS5 command: {}", cmd);
         }
-        0x04 => {
-            // IPv6
-            let mut addr = [0u8; 16];
-            stream.read_exact(&mut addr).await?;
-            format!(
-                "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
-                addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr[6], addr[7],
-                addr[8], addr[9], addr[10], addr[11], addr[12], addr[13], addr[14], addr[15]
-            )
-        }
-        _ => anyhow::bail!("Unsupported address type: {}", atyp),
-    };
 
-    // 读取端口
-    let mut port_bytes = [0u8; 2];
-    stream.read_exact(&mut port_bytes).await?;
-    let port = u16::from_be_bytes(port_bytes);
+        let atyp = request[3];
 
-    let target = format!("{}:{}", host, port);
+        // 解析目标地址
+        let host = match atyp {
+            0x01 => {
+                // IPv4
+                let mut addr = [0u8; 4];
+                stream.read_exact(&mut addr).await?;
+                format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
+            }
+            0x03 => {
+                // 域名
+                let mut len = [0u8; 1];
+                stream.read_exact(&mut len).await?;
+                let len = len[0] as usize;
 
-    // 发送成功响应
-    let response = [
-        0x05, 0x00, 0x00, 0x01, // VER, REP, RSV, ATYP
-        0, 0, 0, 0, // BND.ADDR (0.0.0.0)
-        0, 0, // BND.PORT (0)
-    ];
-    stream.write_all(&response).await?;
-    stream.flush().await?;
+                if len == 0 || len > 255 {
+                    anyhow::bail!("Invalid SOCKS5 domain name length: {}", len);
+                }
 
-    Ok(target)
+                let mut domain = vec![0u8; len];
+                stream.read_exact(&mut domain).await?;
+                String::from_utf8(domain)?
+            }
+            0x04 => {
+                // IPv6
+                let mut addr = [0u8; 16];
+                stream.read_exact(&mut addr).await?;
+                format!(
+                    "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr[6], addr[7],
+                    addr[8], addr[9], addr[10], addr[11], addr[12], addr[13], addr[14], addr[15]
+                )
+            }
+            _ => anyhow::bail!("Unsupported address type: {}", atyp),
+        };
+
+        // 读取端口
+        let mut port_bytes = [0u8; 2];
+        stream.read_exact(&mut port_bytes).await?;
+        let port = u16::from_be_bytes(port_bytes);
+
+        let target = format!("{}:{}", host, port);
+
+        // 发送成功响应
+        let response = [
+            0x05, 0x00, 0x00, 0x01, // VER, REP, RSV, ATYP
+            0, 0, 0, 0, // BND.ADDR (0.0.0.0)
+            0, 0, // BND.PORT (0)
+        ];
+        stream.write_all(&response).await?;
+        stream.flush().await?;
+
+        Ok::<String, anyhow::Error>(target)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("SOCKS5 parsing timeout after {:?}", PROTOCOL_PARSE_TIMEOUT))??;
+
+    Ok(result)
 }
 
 /// 格式化代理类型为可读字符串
@@ -374,12 +430,76 @@ fn format_proxy_type(proxy_type: ProxyType) -> &'static str {
     }
 }
 
+/// 检查目标地址是否为本地或私有地址（用于客户端直连安全检查）
+fn is_unsafe_direct_target(target: &str) -> bool {
+    use std::net::{IpAddr, ToSocketAddrs};
+
+    // 解析地址
+    let addr_str = if target.contains(':') {
+        target.to_string()
+    } else {
+        format!("{}:80", target) // 添加默认端口以便解析
+    };
+
+    // 尝试解析域名/IP
+    match addr_str.to_socket_addrs() {
+        Ok(addrs) => {
+            for addr in addrs {
+                let ip = addr.ip();
+
+                // 检查是否为本地地址
+                if ip.is_loopback() {
+                    return true;
+                }
+
+                // 检查是否为私有地址（内网地址）
+                match ip {
+                    IpAddr::V4(ipv4) => {
+                        let octets = ipv4.octets();
+                        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 0.0.0.0/8
+                        if octets[0] == 10
+                            || (octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31))
+                            || (octets[0] == 192 && octets[1] == 168)
+                            || (octets[0] == 169 && octets[1] == 254)
+                            || octets[0] == 0
+                        {
+                            return true;
+                        }
+                    }
+                    IpAddr::V6(ipv6) => {
+                        // Unique local address (ULA) 或 Link-local
+                        if ipv6.is_unique_local() || ipv6.is_unicast_link_local() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        Err(_) => {
+            // 无法解析地址，出于安全考虑禁止访问
+            true
+        }
+    }
+}
+
 /// 处理直连（不通过服务器）
 async fn handle_direct_connection(
     mut local_stream: TcpStream,
     target: &str,
     forwarder_name: &str,
 ) -> Result<()> {
+    // 安全检查：禁止访问本地地址和内网地址（防止 SSRF 攻击）
+    if is_unsafe_direct_target(target) {
+        warn!(
+            "Forwarder '{}': Blocked direct connection to local/private address: {}",
+            forwarder_name, target
+        );
+        return Err(anyhow::anyhow!(
+            "Direct connection to local or private addresses is not allowed for security reasons"
+        ));
+    }
+
     // 直接连接目标服务器
     let mut remote_stream = match TcpStream::connect(target).await {
         Ok(stream) => {

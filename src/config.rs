@@ -224,6 +224,14 @@ impl ServerConfig {
             bail!("bind_addr cannot be empty");
         }
 
+        // 验证认证密钥强度（安全性）
+        if self.auth_key.len() < 16 {
+            bail!(
+                "auth_key must be at least 16 characters for security (current length: {})",
+                self.auth_key.len()
+            );
+        }
+
         // 验证统计服务器地址（如果配置了）
         if let Some(ref addr) = self.stats_addr {
             if addr.trim().is_empty() {
@@ -255,6 +263,14 @@ impl ClientFullConfig {
     /// 验证配置的有效性
     pub fn validate(&self) -> anyhow::Result<()> {
         use std::collections::HashSet;
+
+        // 验证认证密钥强度（安全性）
+        if self.client.auth_key.len() < 16 {
+            anyhow::bail!(
+                "auth_key must be at least 16 characters for security (current length: {})",
+                self.client.auth_key.len()
+            );
+        }
 
         if self.proxies.is_empty() && self.visitors.is_empty() && self.forwarders.is_empty() {
             anyhow::bail!("No proxy, visitor, or forwarder configurations defined");
@@ -346,6 +362,59 @@ impl ClientFullConfig {
 
             if visitor.bind_addr.trim().is_empty() {
                 anyhow::bail!("Visitor '{}': bind_addr cannot be empty", visitor.name);
+            }
+        }
+
+        // 验证 forwarders 配置
+        let mut seen_forwarder_names = HashSet::new();
+        let mut seen_forwarder_binds = HashSet::new();
+
+        for forwarder in &self.forwarders {
+            // 检查 name 唯一性
+            if !seen_forwarder_names.insert(&forwarder.name) {
+                anyhow::bail!(
+                    "Duplicate forwarder name '{}': each forwarder must have a unique name",
+                    forwarder.name
+                );
+            }
+
+            // 检查 (bind_addr, bind_port) 唯一性
+            if !seen_forwarder_binds.insert((forwarder.bind_addr.clone(), forwarder.bind_port)) {
+                anyhow::bail!(
+                    "Duplicate forwarder binding {}:{}: each forwarder must use a different local bind address/port",
+                    forwarder.bind_addr,
+                    forwarder.bind_port
+                );
+            }
+
+            // 安全检查：警告绑定到非本地地址
+            if forwarder.bind_addr != "127.0.0.1" 
+                && forwarder.bind_addr != "localhost" 
+                && forwarder.bind_addr != "::1" {
+                use tracing::warn;
+                warn!(
+                    "⚠️  SECURITY WARNING: Forwarder '{}' is binding to '{}' which exposes the proxy to your network!\n\
+                     This allows anyone on the network to use your proxy, which may lead to:\n\
+                     - Abuse of your IP address\n\
+                     - Your IP being blacklisted\n\
+                     - Unauthorized use of your bandwidth\n\
+                     RECOMMENDATION: Use bind_addr = '127.0.0.1' for localhost-only access.",
+                    forwarder.name, forwarder.bind_addr
+                );
+            }
+
+            // 验证端口范围
+            if forwarder.bind_port == 0 {
+                anyhow::bail!("Forwarder '{}': bind_port cannot be 0", forwarder.name);
+            }
+
+            // 验证名称不为空
+            if forwarder.name.trim().is_empty() {
+                anyhow::bail!("Forwarder name cannot be empty");
+            }
+
+            if forwarder.bind_addr.trim().is_empty() {
+                anyhow::bail!("Forwarder '{}': bind_addr cannot be empty", forwarder.name);
             }
         }
 

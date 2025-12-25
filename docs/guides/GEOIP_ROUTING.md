@@ -437,6 +437,63 @@ direct_ips = [
 - **DNS 解析**：如果目标是域名，需要先解析 IP（系统 DNS 缓存有效）
 - **建议**：定期更新 GeoIP 数据库（每月一次）
 
+## 隐私和安全注意事项
+
+### DNS 解析隐私
+
+**重要**：在路由决策过程中，如果使用域名白名单（`direct_domains`/`proxy_domains`），系统会对未匹配的域名进行 DNS 解析以获取 IP 地址，然后再进行 GeoIP 查询。
+
+**隐私影响**：
+- DNS 查询会暴露你访问的域名给 DNS 服务器
+- 在某些监控环境下，DNS 查询本身可能泄漏用户意图
+
+**最佳实践**：
+```toml
+[forwarders.routing]
+# ✅ 推荐：优先使用 IP/CIDR 规则（无需 DNS 解析）
+direct_ips = [
+    "192.168.0.0/16",
+    "10.0.0.0/8",
+]
+
+# ⚠️  慎用：域名规则会触发 DNS 解析
+direct_domains = ["*.example.com"]
+
+# ✅ 最安全：使用 GeoIP 国家规则（仅在连接时解析）
+direct_countries = ["CN"]
+```
+
+**建议**：
+- 对于已知的固定 IP 服务，优先使用 `direct_ips`
+- 如果必须使用域名规则，考虑使用加密 DNS（DoH/DoT）
+- 敏感场景下，避免使用域名白名单
+
+### 配置文件安全
+
+配置文件包含认证密钥等敏感信息，应妥善保护：
+
+**Linux/macOS**：
+```bash
+# 仅所有者可读写
+chmod 600 config.toml
+
+# 检查权限
+ls -l config.toml
+# 应显示：-rw------- (600)
+```
+
+**Windows**：
+```powershell
+# 移除其他用户的访问权限
+icacls config.toml /inheritance:r
+icacls config.toml /grant:r "$env:USERNAME:(R,W)"
+```
+
+**建议**：
+- 不要将配置文件提交到 Git 仓库
+- 使用环境变量或密钥管理工具存储 `auth_key`
+- 定期轮换认证密钥
+
 ## 更新数据库
 
 GeoIP 数据库应定期更新以保持准确性：

@@ -18,6 +18,47 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::info;
 
+/// 检查配置文件权限（仅Unix系统）
+#[cfg(unix)]
+fn check_config_file_permissions(config_path: &str) -> Result<()> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tracing::warn;
+
+    let metadata = fs::metadata(config_path)
+        .with_context(|| format!("Failed to read metadata for config file: {}", config_path))?;
+    let permissions = metadata.permissions();
+    let mode = permissions.mode();
+
+    // 检查是否其他用户可读（o+r = 0o004）
+    if mode & 0o004 != 0 {
+        warn!(
+            "⚠️  SECURITY WARNING: Config file '{}' is readable by others (permissions: {:o})\n\
+             This file may contain sensitive information (auth_key).\n\
+             RECOMMENDATION: chmod 600 {}",
+            config_path, mode & 0o777, config_path
+        );
+    }
+
+    // 检查是否组用户可读（g+r = 0o040）
+    if mode & 0o040 != 0 {
+        warn!(
+            "⚠️  SECURITY WARNING: Config file '{}' is readable by group (permissions: {:o})\n\
+             RECOMMENDATION: chmod 600 {}",
+            config_path, mode & 0o777, config_path
+        );
+    }
+
+    Ok(())
+}
+
+/// Windows系统不进行权限检查
+#[cfg(not(unix))]
+fn check_config_file_permissions(_config_path: &str) -> Result<()> {
+    // Windows 权限模型不同，不进行简单的模式位检查
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct CheckResult {
     valid: bool,
@@ -108,6 +149,10 @@ async fn main() -> Result<()> {
         }
         Commands::Server { config } => {
             let config_path = expand_path(config)?;
+            
+            // 检查配置文件权限
+            check_config_file_permissions(&config_path)?;
+            
             info!("Loading server configuration from: {}", config_path);
             let server_config = AppConfig::load_server_config(&config_path)?;
 
@@ -130,6 +175,10 @@ async fn main() -> Result<()> {
         }
         Commands::Client { config } => {
             let config_path = expand_path(config)?;
+            
+            // 检查配置文件权限
+            check_config_file_permissions(&config_path)?;
+            
             info!("Loading client configuration from: {}", config_path);
             let client_config = AppConfig::load_client_config(&config_path)?;
 
