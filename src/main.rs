@@ -152,9 +152,33 @@ async fn main() -> Result<()> {
             // Run client
             client::run_client(client_config, connector).await?;
         }
-        Commands::Top { url, interval } => {
+        Commands::Top { config, url, interval } => {
+            let stats_url = if let Some(config_path) = config {
+                // 从配置文件读取统计服务器地址
+                let config_path = expand_path(config_path)?;
+                info!("Loading server configuration from: {}", config_path);
+                let server_config = AppConfig::load_server_config(&config_path)?;
+                
+                let stats_port = server_config.stats_port
+                    .ok_or_else(|| anyhow::anyhow!("stats_port is not configured in the server configuration file"))?;
+                
+                let stats_addr = server_config.stats_addr
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| server_config.bind_addr.clone());
+                
+                format!("http://{}:{}", stats_addr, stats_port)
+            } else if let Some(url) = url {
+                // 直接使用提供的 URL
+                url.clone()
+            } else {
+                anyhow::bail!("Either --config or --url must be provided");
+            };
+            
+            info!("Connecting to statistics server: {}", stats_url);
             // Run statistics dashboard
-            top::run_dashboard(url.clone(), *interval).await?;
+            top::run_dashboard(stats_url, *interval).await?;
             return Ok(());
         }
     }

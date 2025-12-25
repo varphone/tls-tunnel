@@ -94,9 +94,13 @@ pub enum Commands {
     },
     /// View real-time server statistics (requires stats_port configured)
     Top {
-        /// Server statistics URL (e.g., http://localhost:8080)
-        #[arg(short, long)]
-        url: String,
+        /// Server configuration file path (reads stats_addr and stats_port from server config)
+        #[arg(short, long, conflicts_with = "url")]
+        config: Option<String>,
+
+        /// Server statistics URL (e.g., http://localhost:9090)
+        #[arg(short, long, conflicts_with = "config")]
+        url: Option<String>,
 
         /// Refresh interval in seconds
         #[arg(short, long, default_value = "2")]
