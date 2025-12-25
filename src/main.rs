@@ -100,16 +100,20 @@ fn expand_path(path: &str) -> Result<String> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging based on verbosity level
-    let log_level = match cli.verbose {
+    // Initialize logging based on verbosity level or RUST_LOG env var
+    // Priority: RUST_LOG > --verbose flag
+    let default_log_level = match cli.verbose {
         0 => "off",
         1 => "info",
         2 => "debug",
         _ => "trace",
     };
 
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_log_level));
+
     tracing_subscriber::fmt()
-        .with_env_filter(log_level)
+        .with_env_filter(env_filter)
         .with_target(false)
         .with_thread_ids(false)
         .with_file(false)
