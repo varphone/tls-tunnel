@@ -101,6 +101,9 @@ pub struct ServerConfig {
     /// 统计信息 HTTP 服务器端口（可选）
     #[serde(default)]
     pub stats_port: Option<u16>,
+    /// 统计信息服务器绑定地址（可选，默认使用 bind_addr）
+    #[serde(default)]
+    pub stats_addr: Option<String>,
 }
 
 /// 客户端配置

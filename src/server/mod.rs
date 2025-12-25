@@ -40,13 +40,15 @@ pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Resu
 
     // 如果配置了统计端口，启动HTTP统计服务器
     if let Some(stats_port) = config.stats_port {
+        let stats_addr = config.stats_addr.clone().unwrap_or_else(|| config.bind_addr.clone());
         let stats_manager_clone = stats_manager.clone();
+        let stats_addr_clone = stats_addr.clone();
         tokio::spawn(async move {
-            if let Err(e) = start_stats_server(stats_port, stats_manager_clone).await {
+            if let Err(e) = start_stats_server(stats_addr_clone, stats_port, stats_manager_clone).await {
                 error!("Stats server error: {}", e);
             }
         });
-        info!("Stats server listening on http://0.0.0.0:{}", stats_port);
+        info!("Stats server will listen on http://{}:{}", stats_addr, stats_port);
     }
 
     // 创建传输层服务器
