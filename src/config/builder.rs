@@ -186,6 +186,8 @@ impl ClientConfigBuilder {
             skip_verify: self.skip_verify,
             ca_cert_path: self.ca_cert_path,
             auth_key: self.auth_key.context("auth_key is required")?,
+            stats_port: None,
+            stats_addr: None,
         };
 
         // 验证认证密钥

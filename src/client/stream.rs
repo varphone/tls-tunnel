@@ -46,6 +46,7 @@ pub async fn handle_stream(
     mut stream: yamux::Stream,
     config: ClientFullConfig,
     proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>>,
+    stats_manager: super::stats::ClientStatsManager,
 ) -> Result<()> {
     use futures::io::AsyncReadExt as FuturesAsyncReadExt;
 
@@ -72,6 +73,27 @@ pub async fn handle_stream(
         "Found proxy '{}' (local_port: {}) for publish_port {}",
         proxy.name, proxy.local_port, publish_port
     );
+
+    // 获取统计跟踪器
+    let tracker = stats_manager.get_tracker(&proxy.name);
+
+    // 连接开始
+    if let Some(ref t) = tracker {
+        t.connection_started();
+    }
+
+    // 确保在函数返回时更新统计
+    struct ConnectionGuard {
+        tracker: Option<super::stats::ClientStatsTracker>,
+    }
+    impl Drop for ConnectionGuard {
+        fn drop(&mut self) {
+            if let Some(ref t) = self.tracker {
+                t.connection_ended();
+            }
+        }
+    }
+    let _guard = ConnectionGuard { tracker };
 
     // 获取该代理对应的连接池（连接池键是 publish_port）
     let pool = proxy_pools

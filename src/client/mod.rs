@@ -2,10 +2,14 @@ mod config;
 mod connection;
 mod forwarder;
 mod geoip;
+mod stats;
 mod stream;
 mod visitor;
 
 pub use forwarder::ForwarderHandler;
+pub use stats::{
+    format_bytes, format_duration, ClientProxyStats, ClientStatsManager, ClientStatsTracker,
+};
 pub use visitor::VisitorHandler;
 
 use crate::config::{ClientFullConfig, ProxyType};
@@ -151,10 +155,31 @@ impl Default for ProxyManager {
 
 /// 运行客户端（带自动重连）
 pub async fn run_client(config: ClientFullConfig, tls_connector: TlsConnector) -> Result<()> {
+    // 创建客户端统计管理器
+    let stats_manager = stats::ClientStatsManager::new();
+
+    // 如果配置了统计端口，启动统计 HTTP 服务器
+    if let Some(stats_port) = config.client.stats_port {
+        let stats_addr = config
+            .client
+            .stats_addr
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let manager = stats_manager.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = stats::start_client_stats_server(stats_addr, stats_port, manager).await
+            {
+                error!("Client stats server error: {}", e);
+            }
+        });
+    }
+
     loop {
         info!("Starting TLS tunnel client...");
 
-        match run_client_session(config.clone(), tls_connector.clone()).await {
+        match run_client_session(config.clone(), tls_connector.clone(), stats_manager.clone()).await
+        {
             Ok(_) => {
                 info!("Client session ended normally");
             }
@@ -170,7 +195,11 @@ pub async fn run_client(config: ClientFullConfig, tls_connector: TlsConnector) -
 }
 
 /// 运行单次客户端会话
-async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnector) -> Result<()> {
+async fn run_client_session(
+    config: ClientFullConfig,
+    tls_connector: TlsConnector,
+    stats_manager: stats::ClientStatsManager,
+) -> Result<()> {
     let client_config = &config.client;
     info!(
         "Connecting to {}:{} using {} transport",
@@ -250,6 +279,18 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
     }
 
     info!("Server accepted proxy configurations");
+
+    // 为每个代理创建统计跟踪器
+    for proxy in &config.proxies {
+        let tracker = stats::ClientStatsTracker::new(
+            proxy.name.clone(),
+            "127.0.0.1".to_string(), // 本地监听地址
+            proxy.local_port,
+            client_config.server_addr.clone(),
+            proxy.publish_port,
+        );
+        stats_manager.add_tracker(tracker);
+    }
 
     // 创建连接池
     let pool_config = get_pool_config().await;
@@ -382,9 +423,10 @@ async fn run_client_session(config: ClientFullConfig, tls_connector: TlsConnecto
 
                         let config = config.clone();
                         let proxy_pools = proxy_pools.clone();
+                        let stats_mgr = stats_manager.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = handle_stream(stream, config, proxy_pools).await {
+                            if let Err(e) = handle_stream(stream, config, proxy_pools, stats_mgr).await {
                                 error!("Stream handling error: {}", e);
                             }
                         });

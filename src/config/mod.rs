@@ -257,6 +257,10 @@ pub struct ClientConfig {
     pub ca_cert_path: Option<PathBuf>,
     /// 认证密钥（用于服务器认证）
     pub auth_key: String,
+    /// HTTP 统计信息服务器端口（可选）
+    pub stats_port: Option<u16>,
+    /// HTTP 统计信息服务器绑定地址（可选，默认为 127.0.0.1）
+    pub stats_addr: Option<String>,
 }
 
 impl ClientConfig {
@@ -443,6 +447,8 @@ mod tests {
             skip_verify: false,
             ca_cert_path: Some(PathBuf::from("/path/to/ca.pem")),
             auth_key: "a".repeat(20),
+            stats_port: None,
+            stats_addr: None,
         };
 
         assert_eq!(config.server_port, 8443);

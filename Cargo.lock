@@ -2316,6 +2316,7 @@ dependencies = [
  "ipnetwork",
  "maxminddb",
  "openssl",
+ "parking_lot",
  "ratatui",
  "rcgen",
  "reqwest",
