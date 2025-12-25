@@ -147,6 +147,18 @@ pub struct ClientFullConfig {
 impl ServerConfig {
     /// 确保证书路径配置成对出现或同时缺省
     pub fn validate(&self) -> anyhow::Result<()> {
+        // 验证绑定地址不为空
+        if self.bind_addr.trim().is_empty() {
+            bail!("bind_addr cannot be empty");
+        }
+
+        // 验证统计服务器地址（如果配置了）
+        if let Some(ref addr) = self.stats_addr {
+            if addr.trim().is_empty() {
+                bail!("stats_addr cannot be empty string, either set a valid address or omit it to use bind_addr");
+            }
+        }
+
         // 验证证书配置
         match (&self.cert_path, &self.key_path) {
             (Some(_), Some(_)) | (None, None) => {}

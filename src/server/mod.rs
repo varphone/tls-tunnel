@@ -40,7 +40,14 @@ pub async fn run_server(config: ServerConfig, tls_acceptor: TlsAcceptor) -> Resu
 
     // 如果配置了统计端口，启动HTTP统计服务器
     if let Some(stats_port) = config.stats_port {
-        let stats_addr = config.stats_addr.clone().unwrap_or_else(|| config.bind_addr.clone());
+        // 使用 stats_addr，如果未配置则回退到 bind_addr
+        // validate() 已确保 bind_addr 和 stats_addr（如果存在）都不为空
+        let stats_addr = config.stats_addr
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| config.bind_addr.clone());
+        
         let stats_manager_clone = stats_manager.clone();
         let stats_addr_clone = stats_addr.clone();
         tokio::spawn(async move {
