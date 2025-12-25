@@ -43,6 +43,19 @@ pub async fn connect_local(
     for attempt in 1..=max_retries {
         match TcpStream::connect(local_addr).await {
             Ok(stream) => {
+                // 为需要低延迟的代理类型（如 SSH）启用 TCP_NODELAY
+                if proxy_type.needs_nodelay() {
+                    if let Err(e) = stream.set_nodelay(true) {
+                        tracing::warn!("Failed to set TCP_NODELAY for {}: {}", local_addr, e);
+                    } else {
+                        tracing::debug!(
+                            "Enabled TCP_NODELAY for {} (proxy type: {:?})",
+                            local_addr,
+                            proxy_type
+                        );
+                    }
+                }
+
                 info!(
                     "Connected to local service: {} (attempt {})",
                     local_addr, attempt

@@ -25,5 +25,6 @@ local_port = 3000
 # You can add multiple proxies
 # [[proxies]]
 # name = "ssh"
+# proxy_type = "ssh"
 # publish_port = 2222
 # local_port = 22

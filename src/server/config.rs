@@ -113,6 +113,7 @@ where
     for p in msg.proxies {
         proxies.push(ProxyInfo {
             name: p.name,
+            proxy_type: p.proxy_type,
             publish_addr: p.publish_addr,
             publish_port: p.publish_port,
             local_port: p.local_port,

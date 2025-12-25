@@ -68,6 +68,23 @@ pub async fn handle_visitor_connection(
     visitor: &VisitorConfig,
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
 ) -> Result<()> {
+    // 为需要低延迟的代理类型（如 SSH）启用 TCP_NODELAY
+    if visitor.proxy_type.needs_nodelay() {
+        if let Err(e) = local_stream.set_nodelay(true) {
+            tracing::warn!(
+                "Visitor '{}': Failed to set TCP_NODELAY: {}",
+                visitor.name,
+                e
+            );
+        } else {
+            tracing::debug!(
+                "Visitor '{}': Enabled TCP_NODELAY (proxy type: {:?})",
+                visitor.name,
+                visitor.proxy_type
+            );
+        }
+    }
+
     // 请求创建新的 yamux stream
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     stream_tx

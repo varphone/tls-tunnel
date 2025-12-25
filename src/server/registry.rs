@@ -1,3 +1,4 @@
+use crate::config::ProxyType;
 use crate::stats::ProxyStatsTracker;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ pub const SUPPORTED_PROTOCOL_VERSION: u8 = 1;
 #[derive(Debug, Clone)]
 pub struct ProxyInfo {
     pub name: String,
+    pub proxy_type: ProxyType,
     pub publish_addr: String,
     pub publish_port: u16,
     pub local_port: u16,

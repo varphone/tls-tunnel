@@ -1,6 +1,7 @@
 /// TLS Tunnel 库入口
 ///
 /// 将核心模块导出为库，方便测试和复用
+pub mod cli;
 pub mod client;
 pub mod config;
 pub mod connection_pool;
@@ -11,6 +12,7 @@ pub mod rate_limiter;
 pub mod server;
 pub mod stats;
 pub mod tls;
+pub mod top;
 pub mod transport;
 
 // 重新导出常用类型

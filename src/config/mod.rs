@@ -25,6 +25,9 @@ pub enum ProxyType {
     /// HTTP/2.0（单连接多路复用）
     #[serde(rename = "http/2.0")]
     Http2,
+    /// SSH 连接（启用 TCP_NODELAY 降低延迟）
+    #[serde(rename = "ssh")]
+    Ssh,
     /// HTTP 代理（用于 forwarder）
     #[serde(rename = "http")]
     HttpProxy,
@@ -40,6 +43,7 @@ impl ProxyType {
             ProxyType::Tcp => false,
             ProxyType::Http11 => true,
             ProxyType::Http2 => true,
+            ProxyType::Ssh => false,
             ProxyType::HttpProxy | ProxyType::Socks5Proxy => false,
         }
     }
@@ -47,6 +51,12 @@ impl ProxyType {
     /// 是否需要单一长连接多路复用
     pub fn is_multiplexed(self) -> bool {
         matches!(self, ProxyType::Http2)
+    }
+
+    /// 是否需要启用 TCP_NODELAY（禁用 Nagle 算法）
+    /// 适用于交互式应用（如 SSH），优先降低延迟而非提高吞吐量
+    pub fn needs_nodelay(self) -> bool {
+        matches!(self, ProxyType::Ssh)
     }
 }
 

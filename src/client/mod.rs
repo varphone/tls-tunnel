@@ -6,12 +6,6 @@ mod stats;
 mod stream;
 mod visitor;
 
-pub use forwarder::ForwarderHandler;
-pub use stats::{
-    format_bytes, format_duration, ClientProxyStats, ClientStatsManager, ClientStatsTracker,
-};
-pub use visitor::VisitorHandler;
-
 use crate::config::{ClientFullConfig, ProxyType};
 use crate::connection_pool::ConnectionPool;
 use crate::transport::create_transport_client;
@@ -31,6 +25,9 @@ use config::{get_reconnect_delay, read_error_message};
 use connection::get_pool_config;
 use stream::{handle_stream, send_client_config};
 use visitor::run_visitor_listener;
+
+pub use forwarder::ForwarderHandler;
+pub use visitor::VisitorHandler;
 
 /// 代理处理器状态
 #[derive(Debug, Clone, PartialEq, Eq)]

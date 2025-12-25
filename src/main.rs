@@ -1,24 +1,14 @@
-mod cli;
-mod client;
-mod config;
-mod connection_pool;
-mod error;
-mod io_util;
-mod limited_reader;
-mod rate_limiter;
-mod server;
-mod stats;
-mod tls;
-mod top;
-mod transport;
-
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{Cli, Commands};
-use config::AppConfig;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tls_tunnel::{
+    cli::{Cli, Commands},
+    client, config,
+    config::AppConfig,
+    server, tls, top, transport,
+};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::info;
 
@@ -114,8 +104,8 @@ async fn main() -> Result<()> {
 
     // 检测是否在 systemd 环境中运行
     // systemd 会设置 INVOCATION_ID 或 JOURNAL_STREAM 环境变量
-    let is_systemd = std::env::var("INVOCATION_ID").is_ok()
-        || std::env::var("JOURNAL_STREAM").is_ok();
+    let is_systemd =
+        std::env::var("INVOCATION_ID").is_ok() || std::env::var("JOURNAL_STREAM").is_ok();
 
     let fmt_layer = tracing_subscriber::fmt()
         .with_env_filter(env_filter)

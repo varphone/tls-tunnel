@@ -28,6 +28,7 @@ pub async fn start_proxy_listener(
                 let proxy_name = proxy.name.clone();
                 let stream_tx = stream_tx.clone();
                 let tracker_clone = tracker.clone();
+                let proxy_type = proxy.proxy_type;
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_proxy_connection(
@@ -36,6 +37,7 @@ pub async fn start_proxy_listener(
                         proxy_name,
                         proxy.publish_port,
                         tracker_clone,
+                        proxy_type,
                     )
                     .await
                     {
@@ -57,7 +59,21 @@ pub async fn handle_proxy_connection(
     proxy_name: String,
     publish_port: u16,
     tracker: ProxyStatsTracker,
+    proxy_type: crate::config::ProxyType,
 ) -> Result<()> {
+    // 为需要低延迟的代理类型（如 SSH）启用 TCP_NODELAY
+    if proxy_type.needs_nodelay() {
+        if let Err(e) = inbound.set_nodelay(true) {
+            tracing::warn!("Failed to set TCP_NODELAY for inbound connection: {}", e);
+        } else {
+            tracing::debug!(
+                "Enabled TCP_NODELAY for proxy '{}' (type: {:?})",
+                proxy_name,
+                proxy_type
+            );
+        }
+    }
+
     // 连接开始，增加计数
     tracker.connection_started();
 
