@@ -240,6 +240,25 @@ pub async fn run_forwarder_listener(
         forwarder.name, MAX_CONCURRENT_CONNECTIONS
     );
 
+    // 创建连接池缓存
+    let connection_pool = Arc::new(ConnectionPool::new(
+        100, // 最多缓存 100 个目标的连接
+        Duration::from_secs(300), // 连接空闲 5 分钟后过期
+    ));
+    info!(
+        "Forwarder '{}': Connection pool initialized (max targets: 100, idle timeout: 5min)",
+        forwarder.name
+    );
+
+    // 启动连接池清理任务（定期清理过期连接）
+    let pool_cleanup = connection_pool.clone();
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(60)).await;
+            pool_cleanup.cleanup_expired().await;
+        }
+    });
+
     // 创建快速失败管理器并启动清理任务
     let failed_target_manager = FailedTargetManager::new();
     failed_target_manager.clone().start_cleanup_task();
@@ -280,6 +299,7 @@ pub async fn run_forwarder_listener(
                 let router_clone = router.clone();
                 let stats_tracker_clone = stats_tracker.clone();
                 let failed_target_manager_clone = failed_target_manager.clone();
+                let connection_pool_clone = connection_pool.clone();
 
                 tokio::spawn(async move {
                     // 持有 permit 直到任务结束，自动释放
@@ -291,6 +311,7 @@ pub async fn run_forwarder_listener(
                         router_clone,
                         stats_tracker_clone,
                         failed_target_manager_clone,
+                        connection_pool_clone,
                     )
                     .await
                     {
@@ -318,6 +339,7 @@ async fn handle_forwarder_connection(
     router: Option<Arc<GeoIpRouter>>,
     stats_tracker: Option<ClientStatsTracker>,
     failed_target_manager: FailedTargetManager,
+    connection_pool: Arc<ConnectionPool>,
 ) -> Result<()> {
     // 获取客户端地址用于审计日志
     let peer_addr = local_stream
@@ -377,12 +399,9 @@ async fn handle_forwarder_connection(
             return Err(anyhow::anyhow!("Target blacklisted"));
         }
 
-        // 直接连接目标并转发请求
-        let mut remote_stream = match TcpStream::connect(&target).await {
-            Ok(stream) => {
-                stream.set_nodelay(true)?;
-                stream
-            }
+        // 直接连接目标并转发请求（使用连接池）
+        let mut remote_stream = match connection_pool.get_or_create(&target).await {
+            Ok(stream) => stream,
             Err(e) => {
                 failed_target_manager.record_failure(&target).await;
                 local_stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nConnection failed").await.ok();
@@ -390,7 +409,7 @@ async fn handle_forwarder_connection(
                 if let Some(ref tracker) = stats_tracker {
                     tracker.connection_ended();
                 }
-                return Err(anyhow::anyhow!("Connection failed: {}", e));
+                return Err(e);
             }
         };
 
@@ -473,6 +492,7 @@ async fn handle_forwarder_connection(
             &forwarder.name,
             stats_tracker.clone(),
             failed_target_manager.clone(),
+            connection_pool.clone(),
         )
         .await;
         // 无论成功或失败，都记录连接结束
@@ -973,6 +993,7 @@ async fn handle_direct_connection(
     forwarder_name: &str,
     stats_tracker: Option<ClientStatsTracker>,
     failed_target_manager: FailedTargetManager,
+    connection_pool: Arc<ConnectionPool>,
 ) -> Result<()> {
     // 安全检查：禁止访问本地地址和内网地址（防止 SSRF 攻击）
     if is_unsafe_direct_target(target) {
@@ -985,15 +1006,11 @@ async fn handle_direct_connection(
         ));
     }
 
-    // 直接连接目标服务器
-    let mut remote_stream = match TcpStream::connect(target).await {
+    // 使用连接池获取或创建到目标服务器的连接
+    let mut remote_stream = match connection_pool.get_or_create(target).await {
         Ok(stream) => {
-            // 优化 TCP 选项以降低延迟
-            if let Err(e) = stream.set_nodelay(true) {
-                warn!("Failed to set TCP_NODELAY on remote: {}", e);
-            }
             info!(
-                "Forwarder '{}': Successfully connected directly to {}",
+                "Forwarder '{}': Connected directly to {} (from pool or new)",
                 forwarder_name, target
             );
             stream
