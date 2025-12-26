@@ -1070,6 +1070,8 @@ pub struct ForwarderHandler {
     stats_tracker: Option<ClientStatsTracker>,
     status: Arc<tokio::sync::RwLock<crate::client::HandlerStatus>>,
     shutdown_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    #[allow(dead_code)]
+    connection_pool: Arc<ConnectionPool>,
 }
 
 impl ForwarderHandler {
@@ -1088,6 +1090,10 @@ impl ForwarderHandler {
                 crate::client::HandlerStatus::Stopped,
             )),
             shutdown_tx: Arc::new(tokio::sync::RwLock::new(None)),
+            connection_pool: Arc::new(ConnectionPool::new(
+                100, // 最多缓存 100 个目标的连接
+                Duration::from_secs(300), // 连接空闲 5 分钟后过期
+            )),
         }
     }
 }
