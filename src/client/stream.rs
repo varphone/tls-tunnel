@@ -7,8 +7,10 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{error, info, warn};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt as FuturesAsyncWriteExt};
 
 use super::config::PROTOCOL_VERSION;
+use super::stats::ClientStatsTracker;
 
 #[derive(Serialize)]
 pub struct ClientConfigMessage<'a> {
@@ -117,9 +119,28 @@ pub async fn handle_stream(
         let mut local_read = local_read.compat();
         let mut local_write = local_write.compat_write();
 
-        let local_to_stream = async { futures::io::copy(&mut local_read, &mut stream_write).await };
+        // 使用支持统计记录的复制函数
+        let tracker_c2s = _guard.tracker.clone();
+        let local_to_stream = async {
+            copy_with_stats(
+                &mut local_read,
+                &mut stream_write,
+                tracker_c2s.as_ref(),
+                |tracker, n| tracker.record_bytes_sent(n),
+            )
+            .await
+        };
 
-        let stream_to_local = async { futures::io::copy(&mut stream_read, &mut local_write).await };
+        let tracker_s2c = _guard.tracker.clone();
+        let stream_to_local = async {
+            copy_with_stats(
+                &mut stream_read,
+                &mut local_write,
+                tracker_s2c.as_ref(),
+                |tracker, n| tracker.record_bytes_received(n),
+            )
+            .await
+        };
 
         let result = tokio::select! {
             result = local_to_stream => result,
@@ -155,4 +176,38 @@ pub async fn handle_stream(
             }
         }
     }
+}
+
+/// 带统计功能的数据复制函数
+/// 在复制数据的同时记录统计信息（使用 futures traits）
+async fn copy_with_stats<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    stats_tracker: Option<&ClientStatsTracker>,
+    record_fn: impl Fn(&ClientStatsTracker, u64),
+) -> std::io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: FuturesAsyncWriteExt + Unpin,
+{
+    const COPY_BUFFER_SIZE: usize = 65536;
+    let mut buf = vec![0u8; COPY_BUFFER_SIZE];
+    let mut total_copied = 0u64;
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+
+        writer.write_all(&buf[..n]).await?;
+        total_copied += n as u64;
+
+        // 实时更新统计信息
+        if let Some(tracker) = stats_tracker {
+            record_fn(tracker, n as u64);
+        }
+    }
+
+    Ok(total_copied)
 }
