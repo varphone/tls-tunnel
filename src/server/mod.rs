@@ -251,10 +251,52 @@ async fn handle_client_transport(
         return Err(e);
     }
 
+    // 预检查哪些代理会被拒绝（提前告知客户端）
+    let mut rejected_proxies: Vec<String> = Vec::new();
+    {
+        let registry = state.proxy_registry.read().await;
+        for proxy in &client_configs.proxies {
+            let key = (proxy.name.clone(), proxy.publish_port);
+            if registry.contains_key(&key) {
+                rejected_proxies.push(format!("{}:{}", proxy.name, proxy.publish_port));
+            }
+        }
+    }
+
+    // 如果所有代理都会被拒绝，返回错误
+    if !client_configs.proxies.is_empty() && rejected_proxies.len() == client_configs.proxies.len() {
+        let error_msg = format!(
+            "All proxies are already registered by other clients: {}",
+            rejected_proxies.join(", ")
+        );
+        error!("{}", error_msg);
+        tls_stream.write_all(&[0]).await.ok();
+        send_error_message(&mut tls_stream, &error_msg).await.ok();
+        return Err(anyhow::anyhow!(error_msg));
+    }
+
     // 发送配置验证成功确认
     tls_stream.write_all(&[1]).await?;
     tls_stream.flush().await?;
     info!("Client configurations validated and accepted");
+
+    // 发送被拒绝的代理列表给客户端
+    // 格式：被拒绝的数量（1字节）+ 对每个被拒绝的代理：名称长度（2字节）+ 名称
+    tls_stream.write_all(&[rejected_proxies.len() as u8]).await?;
+    for rejected in &rejected_proxies {
+        let name_bytes = rejected.as_bytes();
+        tls_stream.write_all(&(name_bytes.len() as u16).to_be_bytes()).await?;
+        tls_stream.write_all(name_bytes).await?;
+    }
+    tls_stream.flush().await?;
+
+    if !rejected_proxies.is_empty() {
+        info!(
+            "Client informed of {} rejected proxies: {}",
+            rejected_proxies.len(),
+            rejected_proxies.join(", ")
+        );
+    }
 
     // 建立 yamux 连接（使用兼容层转换tokio的AsyncRead/Write为futures的）
     let yamux_config = YamuxConfig::default();
@@ -271,7 +313,6 @@ async fn handle_client_transport(
 
     // 注册所有proxy到全局注册表，允许部分成功（跳过已注册的）
     let mut proxy_keys: Vec<(String, u16)> = Vec::new();
-    let mut rejected_proxies: Vec<String> = Vec::new();
     {
         let mut registry = state.proxy_registry.write().await;
         for proxy in &client_configs.proxies {
@@ -283,7 +324,6 @@ async fn handle_client_transport(
                     "Proxy '{}' with publish_port {} is already registered by another client, skipping",
                     proxy.name, proxy.publish_port
                 );
-                rejected_proxies.push(format!("'{}' (port {})", proxy.name, proxy.publish_port));
             } else {
                 info!(
                     "Registering proxy '{}' with publish_port {} for visitor access",
@@ -299,22 +339,6 @@ async fn handle_client_transport(
                 proxy_keys.push(key);
             }
         }
-    }
-
-    // 如果有被拒绝的代理，记录警告
-    if !rejected_proxies.is_empty() {
-        warn!(
-            "Some proxies were already registered by other clients and were skipped: {}",
-            rejected_proxies.join(", ")
-        );
-    }
-
-    // 如果所有代理都被拒绝，断开连接
-    if proxy_keys.is_empty() && !client_configs.proxies.is_empty() {
-        error!(
-            "All proxies were rejected (already registered by other clients). Disconnecting."
-        );
-        return Err(anyhow::anyhow!("All proxies were rejected"));
     }
 
     // 确保断开时清理注册表

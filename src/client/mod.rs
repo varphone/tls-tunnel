@@ -277,6 +277,33 @@ async fn run_client_session(
 
     info!("Server accepted proxy configurations");
 
+    // 读取被拒绝的代理列表
+    let mut rejected_count_buf = [0u8; 1];
+    tls_stream.read_exact(&mut rejected_count_buf).await?;
+    let rejected_count = rejected_count_buf[0] as usize;
+
+    let mut rejected_proxies = Vec::new();
+    for _ in 0..rejected_count {
+        let mut len_buf = [0u8; 2];
+        tls_stream.read_exact(&mut len_buf).await?;
+        let name_len = u16::from_be_bytes(len_buf) as usize;
+        
+        let mut name_buf = vec![0u8; name_len];
+        tls_stream.read_exact(&mut name_buf).await?;
+        let proxy_name = String::from_utf8(name_buf)?;
+        
+        rejected_proxies.push(proxy_name);
+    }
+
+    // 如果有被拒绝的代理，记录警告
+    if !rejected_proxies.is_empty() {
+        warn!(
+            "Server rejected {} proxy(ies), already registered by other clients: {}",
+            rejected_proxies.len(),
+            rejected_proxies.join(", ")
+        );
+    }
+
     // 为每个代理创建统计跟踪器
     for proxy in &config.proxies {
         let tracker = stats::ClientStatsTracker::new(
