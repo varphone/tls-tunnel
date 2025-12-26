@@ -1,10 +1,12 @@
 use crate::config::{ForwarderConfig, ProxyType};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, RwLock};
 use tokio::time::{sleep, Duration};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{debug, error, info, warn};
@@ -22,6 +24,134 @@ const PROTOCOL_PARSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 数据复制缓冲区大小
 const COPY_BUFFER_SIZE: usize = 8192;
+
+/// 快速失败配置
+const FAILED_TARGET_THRESHOLD: u32 = 3; // 失败次数阈值
+const FAILED_TARGET_TIMEOUT: Duration = Duration::from_secs(30 * 60); // 黑名单过期时间（30分钟）
+const FAILED_TARGET_CLEANUP_INTERVAL: Duration = Duration::from_secs(60); // 清理间隔（1分钟）
+
+/// 失败目标的信息
+#[derive(Debug, Clone)]
+struct FailedTarget {
+    /// 失败次数
+    failure_count: u32,
+    /// 加入黑名单的时间戳（秒）
+    blacklist_time: u64,
+}
+
+/// 快速失败管理器
+#[derive(Clone)]
+pub struct FailedTargetManager {
+    /// 失败目标映射表：目标地址 -> 失败信息
+    targets: Arc<RwLock<HashMap<String, FailedTarget>>>,
+}
+
+impl FailedTargetManager {
+    /// 创建新的快速失败管理器
+    pub fn new() -> Self {
+        Self {
+            targets: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// 启动清理任务（删除过期的黑名单条目）
+    pub fn start_cleanup_task(self) {
+        tokio::spawn(async move {
+            loop {
+                sleep(FAILED_TARGET_CLEANUP_INTERVAL).await;
+                self.cleanup_expired_targets().await;
+            }
+        });
+    }
+
+    /// 检查目标是否在黑名单中
+    pub async fn is_blacklisted(&self, target: &str) -> bool {
+        let targets = self.targets.read().await;
+        if let Some(failed) = targets.get(target) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // 检查是否还在黑名单期内
+            if now < failed.blacklist_time + FAILED_TARGET_TIMEOUT.as_secs() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 记录连接失败
+    pub async fn record_failure(&self, target: &str) {
+        let mut targets = self.targets.write().await;
+        let entry = targets.entry(target.to_string()).or_insert_with(|| {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            FailedTarget {
+                failure_count: 0,
+                blacklist_time: now,
+            }
+        });
+
+        entry.failure_count += 1;
+
+        if entry.failure_count >= FAILED_TARGET_THRESHOLD {
+            // 更新黑名单时间为当前时间
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            entry.blacklist_time = now;
+            warn!(
+                "Target '{}' added to blacklist due to {} consecutive failures",
+                target, entry.failure_count
+            );
+        }
+    }
+
+    /// 清理过期的黑名单条目
+    async fn cleanup_expired_targets(&self) {
+        let mut targets = self.targets.write().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let expired_targets: Vec<String> = targets
+            .iter()
+            .filter(|(_, failed)| now >= failed.blacklist_time + FAILED_TARGET_TIMEOUT.as_secs())
+            .map(|(target, _)| target.clone())
+            .collect();
+
+        for target in expired_targets {
+            targets.remove(&target);
+            info!("Removed expired target '{}' from blacklist", target);
+        }
+    }
+
+    /// 获取失败目标数量（用于统计）
+    pub async fn failed_targets_count(&self) -> usize {
+        let targets = self.targets.read().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        targets
+            .iter()
+            .filter(|(_, failed)| {
+                now < failed.blacklist_time + FAILED_TARGET_TIMEOUT.as_secs()
+            })
+            .count()
+    }
+}
+
+impl Default for FailedTargetManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// 实时统计的数据复制函数
 /// 相比 tokio::io::copy，这个函数会在每次复制数据后立即更新统计信息
@@ -86,6 +216,14 @@ pub async fn run_forwarder_listener(
         forwarder.name, MAX_CONCURRENT_CONNECTIONS
     );
 
+    // 创建快速失败管理器并启动清理任务
+    let failed_target_manager = FailedTargetManager::new();
+    failed_target_manager.clone().start_cleanup_task();
+    info!(
+        "Forwarder '{}': Fast-fail manager initialized (threshold: {}, timeout: {:?})",
+        forwarder.name, FAILED_TARGET_THRESHOLD, FAILED_TARGET_TIMEOUT
+    );
+
     loop {
         match listener.accept().await {
             Ok((local_stream, peer_addr)) => {
@@ -112,6 +250,7 @@ pub async fn run_forwarder_listener(
                 let stream_tx_clone = stream_tx.clone();
                 let router_clone = router.clone();
                 let stats_tracker_clone = stats_tracker.clone();
+                let failed_target_manager_clone = failed_target_manager.clone();
 
                 tokio::spawn(async move {
                     // 持有 permit 直到任务结束，自动释放
@@ -122,6 +261,7 @@ pub async fn run_forwarder_listener(
                         stream_tx_clone,
                         router_clone,
                         stats_tracker_clone,
+                        failed_target_manager_clone,
                     )
                     .await
                     {
@@ -148,6 +288,7 @@ async fn handle_forwarder_connection(
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     router: Option<Arc<GeoIpRouter>>,
     stats_tracker: Option<ClientStatsTracker>,
+    failed_target_manager: FailedTargetManager,
 ) -> Result<()> {
     // 获取客户端地址用于审计日志
     let peer_addr = local_stream
@@ -170,6 +311,32 @@ async fn handle_forwarder_connection(
         ),
     };
 
+    // 检查目标是否在黑名单中（快速失败）
+    if failed_target_manager.is_blacklisted(&target).await {
+        warn!(
+            "Forwarder '{}': Target '{}' is blacklisted due to previous failures, rejecting immediately",
+            forwarder.name, target
+        );
+        let error_response = format!(
+            "HTTP/1.1 503 Service Unavailable\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: 47\r\n\
+             Connection: close\r\n\
+             \r\n\
+             Target is temporarily unavailable (blacklisted)"
+        );
+        local_stream.write_all(error_response.as_bytes()).await.ok();
+        
+        // 记录连接结束
+        if let Some(ref tracker) = stats_tracker {
+            tracker.connection_ended();
+        }
+        return Err(anyhow::anyhow!(
+            "Target '{}' is blacklisted due to previous failures",
+            target
+        ));
+    }
+
     // 2. 判断是否应该直连
     let should_direct = router
         .as_ref()
@@ -182,7 +349,14 @@ async fn handle_forwarder_connection(
             "Forwarder '{}': Connection from {} to {} -> DIRECT (bypassing proxy)",
             forwarder.name, peer_addr, target
         );
-        let result = handle_direct_connection(local_stream, &target, &forwarder.name, stats_tracker.clone()).await;
+        let result = handle_direct_connection(
+            local_stream,
+            &target,
+            &forwarder.name,
+            stats_tracker.clone(),
+            failed_target_manager.clone(),
+        )
+        .await;
         // 无论成功或失败，都记录连接结束
         if let Some(ref tracker) = stats_tracker {
             tracker.connection_ended();
@@ -243,9 +417,12 @@ async fn handle_forwarder_connection(
             Err(_) => "Unknown error".to_string(),
         };
         error!(
-            "Forwarder '{}': Server rejected connection: {}",
-            forwarder.name, error_msg
+            "Forwarder '{}': Server rejected connection to '{}': {}",
+            forwarder.name, target, error_msg
         );
+
+        // 记录连接失败
+        failed_target_manager.record_failure(&target).await;
 
         // 如果是 HTTP 代理，返回错误给客户端
         if forwarder.proxy_type == ProxyType::HttpProxy {
@@ -260,6 +437,11 @@ async fn handle_forwarder_connection(
                 error_msg
             );
             local_stream.write_all(error_response.as_bytes()).await.ok();
+        }
+
+        // 记录连接结束
+        if let Some(ref tracker) = stats_tracker {
+            tracker.connection_ended();
         }
 
         return Err(anyhow::anyhow!(
@@ -591,6 +773,7 @@ async fn handle_direct_connection(
     target: &str,
     forwarder_name: &str,
     stats_tracker: Option<ClientStatsTracker>,
+    failed_target_manager: FailedTargetManager,
 ) -> Result<()> {
     // 安全检查：禁止访问本地地址和内网地址（防止 SSRF 攻击）
     if is_unsafe_direct_target(target) {
@@ -614,9 +797,13 @@ async fn handle_direct_connection(
         }
         Err(e) => {
             error!(
-                "Forwarder '{}': Failed to connect directly to {}: {}",
+                "Forwarder '{}': Failed to connect directly to '{}': {}",
                 forwarder_name, target, e
             );
+            
+            // 记录连接失败
+            failed_target_manager.record_failure(target).await;
+            
             return Err(anyhow::anyhow!(
                 "Failed to connect directly to {}: {}",
                 target,
