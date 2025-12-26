@@ -251,6 +251,24 @@ async fn handle_client_transport(
         return Err(e);
     }
 
+    // 检查代理是否已被其他客户端注册（全局去重）
+    {
+        let registry = state.proxy_registry.read().await;
+        for proxy in &client_configs.proxies {
+            let key = (proxy.name.clone(), proxy.publish_port);
+            if registry.contains_key(&key) {
+                let error_msg = format!(
+                    "Proxy '{}' with publish_port {} is already registered by another client",
+                    proxy.name, proxy.publish_port
+                );
+                error!("{}", error_msg);
+                tls_stream.write_all(&[0]).await.ok();
+                send_error_message(&mut tls_stream, &error_msg).await.ok();
+                return Err(anyhow::anyhow!(error_msg));
+            }
+        }
+    }
+
     // 发送配置验证成功确认
     tls_stream.write_all(&[1]).await?;
     tls_stream.flush().await?;
@@ -278,12 +296,13 @@ async fn handle_client_transport(
     {
         let mut registry = state.proxy_registry.write().await;
         for proxy in &client_configs.proxies {
+            let key = (proxy.name.clone(), proxy.publish_port);
             info!(
                 "Registering proxy '{}' with publish_port {} for visitor access",
                 proxy.name, proxy.publish_port
             );
             registry.insert(
-                (proxy.name.clone(), proxy.publish_port),
+                key,
                 registry::ProxyRegistration {
                     stream_tx: stream_tx.clone(),
                     proxy_info: proxy.clone(),
