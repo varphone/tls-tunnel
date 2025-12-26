@@ -251,24 +251,6 @@ async fn handle_client_transport(
         return Err(e);
     }
 
-    // 检查代理是否已被其他客户端注册（全局去重）
-    {
-        let registry = state.proxy_registry.read().await;
-        for proxy in &client_configs.proxies {
-            let key = (proxy.name.clone(), proxy.publish_port);
-            if registry.contains_key(&key) {
-                let error_msg = format!(
-                    "Proxy '{}' with publish_port {} is already registered by another client",
-                    proxy.name, proxy.publish_port
-                );
-                error!("{}", error_msg);
-                tls_stream.write_all(&[0]).await.ok();
-                send_error_message(&mut tls_stream, &error_msg).await.ok();
-                return Err(anyhow::anyhow!(error_msg));
-            }
-        }
-    }
-
     // 发送配置验证成功确认
     tls_stream.write_all(&[1]).await?;
     tls_stream.flush().await?;
@@ -287,28 +269,52 @@ async fn handle_client_transport(
     // 创建broadcast channel用于监控yamux连接状态
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
-    // 注册所有proxy到全局注册表
-    let proxy_keys: Vec<(String, u16)> = client_configs
-        .proxies
-        .iter()
-        .map(|p| (p.name.clone(), p.publish_port))
-        .collect();
+    // 注册所有proxy到全局注册表，允许部分成功（跳过已注册的）
+    let mut proxy_keys: Vec<(String, u16)> = Vec::new();
+    let mut rejected_proxies: Vec<String> = Vec::new();
     {
         let mut registry = state.proxy_registry.write().await;
         for proxy in &client_configs.proxies {
             let key = (proxy.name.clone(), proxy.publish_port);
-            info!(
-                "Registering proxy '{}' with publish_port {} for visitor access",
-                proxy.name, proxy.publish_port
-            );
-            registry.insert(
-                key,
-                registry::ProxyRegistration {
-                    stream_tx: stream_tx.clone(),
-                    proxy_info: proxy.clone(),
-                },
-            );
+            
+            // 检查是否已被其他客户端注册
+            if registry.contains_key(&key) {
+                warn!(
+                    "Proxy '{}' with publish_port {} is already registered by another client, skipping",
+                    proxy.name, proxy.publish_port
+                );
+                rejected_proxies.push(format!("'{}' (port {})", proxy.name, proxy.publish_port));
+            } else {
+                info!(
+                    "Registering proxy '{}' with publish_port {} for visitor access",
+                    proxy.name, proxy.publish_port
+                );
+                registry.insert(
+                    key.clone(),
+                    registry::ProxyRegistration {
+                        stream_tx: stream_tx.clone(),
+                        proxy_info: proxy.clone(),
+                    },
+                );
+                proxy_keys.push(key);
+            }
         }
+    }
+
+    // 如果有被拒绝的代理，记录警告
+    if !rejected_proxies.is_empty() {
+        warn!(
+            "Some proxies were already registered by other clients and were skipped: {}",
+            rejected_proxies.join(", ")
+        );
+    }
+
+    // 如果所有代理都被拒绝，断开连接
+    if proxy_keys.is_empty() && !client_configs.proxies.is_empty() {
+        error!(
+            "All proxies were rejected (already registered by other clients). Disconnecting."
+        );
+        return Err(anyhow::anyhow!("All proxies were rejected"));
     }
 
     // 确保断开时清理注册表
