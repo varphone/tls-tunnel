@@ -299,6 +299,42 @@ impl ServerControlChannel {
         self.send_response(stream, &response).await
     }
 
+    /// 发送异常通知
+    pub async fn send_exception_notification(
+        &self,
+        stream: &mut ::yamux::Stream,
+        level: &str,
+        message: String,
+        code: Option<String>,
+        data: Option<serde_json::Value>,
+    ) -> Result<()> {
+        use tracing::info;
+
+        let notification = ExceptionNotification {
+            level: level.to_string(),
+            message: message.clone(),
+            code,
+            data,
+        };
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "push_exception".to_string(),
+            params: serde_json::to_value(notification)?,
+            id: None, // 通知没有 ID
+        };
+
+        let request_json = serde_json::to_vec(&request)?;
+        let len_bytes = (request_json.len() as u32).to_be_bytes();
+
+        stream.write_all(&len_bytes).await?;
+        stream.write_all(&request_json).await?;
+        stream.flush().await?;
+
+        info!("Sent exception notification: level={}, message={}", level, message);
+        Ok(())
+    }
+
     /// 发送响应
     async fn send_response(
         &self,

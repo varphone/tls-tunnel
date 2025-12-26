@@ -1,5 +1,4 @@
 use super::registry::{ConnectionGuard, ProxyInfo};
-use crate::protocol::ProxyStatusUpdate;
 use crate::stats::ProxyStatsTracker;
 use anyhow::{Context, Result};
 use tokio::net::TcpStream;
@@ -11,11 +10,20 @@ use tracing::{error, info, warn};
 const MAX_BIND_RETRIES: u32 = 10;
 const INITIAL_RETRY_DELAY_SECS: u64 = 2;
 const MAX_RETRY_DELAY_SECS: u64 = 60;
+
+/// 异常通知消息
+pub struct ExceptionNotification {
+    pub level: String,
+    pub message: String,
+    pub code: Option<String>,
+    pub data: Option<serde_json::Value>,
+}
+
 pub async fn start_proxy_listener_with_notify(
     proxy: ProxyInfo,
     stream_tx: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
     tracker: ProxyStatsTracker,
-    _status_tx: Option<mpsc::Sender<ProxyStatusUpdate>>,
+    exception_tx: Option<mpsc::UnboundedSender<ExceptionNotification>>,
 ) -> Result<()> {
     let addr = format!("{}:{}", proxy.publish_addr, proxy.publish_port);
     let proxy_name = proxy.name.clone();
@@ -59,6 +67,27 @@ pub async fn start_proxy_listener_with_notify(
                         proxy_name, retry_count, MAX_BIND_RETRIES, error_msg, retry_delay
                     );
 
+                    // 发送警告级别异常通知
+                    if let Some(ref tx) = exception_tx {
+                        let _ = tx.send(ExceptionNotification {
+                            level: "warning".to_string(),
+                            message: format!(
+                                "代理 '{}' 绑定失败 (尝试 {}/{}): {}. 将在 {} 秒后重试",
+                                proxy_name, retry_count, MAX_BIND_RETRIES, error_msg, retry_delay
+                            ),
+                            code: Some("PROXY_BIND_RETRY".to_string()),
+                            data: Some(serde_json::json!({
+                                "proxy_name": proxy_name,
+                                "publish_addr": proxy.publish_addr,
+                                "publish_port": proxy.publish_port,
+                                "retry_count": retry_count,
+                                "max_retries": MAX_BIND_RETRIES,
+                                "retry_delay_secs": retry_delay,
+                                "error": error_msg
+                            })),
+                        });
+                    }
+
                     sleep(Duration::from_secs(retry_delay)).await;
 
                     // 指数退避：下次等待时间翻倍，但不超过最大值
@@ -68,6 +97,25 @@ pub async fn start_proxy_listener_with_notify(
                         "Proxy '{}' bind failed after {} retries: {}",
                         proxy_name, MAX_BIND_RETRIES, error_msg
                     );
+
+                    // 发送错误级别异常通知
+                    if let Some(ref tx) = exception_tx {
+                        let _ = tx.send(ExceptionNotification {
+                            level: "error".to_string(),
+                            message: format!(
+                                "代理 '{}' 绑定失败，已达到最大重试次数 ({})",
+                                proxy_name, MAX_BIND_RETRIES
+                            ),
+                            code: Some("PROXY_BIND_FAILED".to_string()),
+                            data: Some(serde_json::json!({
+                                "proxy_name": proxy_name,
+                                "publish_addr": proxy.publish_addr,
+                                "publish_port": proxy.publish_port,
+                                "max_retries": MAX_BIND_RETRIES,
+                                "final_error": error_msg
+                            })),
+                        });
+                    }
 
                     return Err(anyhow::anyhow!(
                         "Failed to bind proxy '{}' after {} retries: {}",

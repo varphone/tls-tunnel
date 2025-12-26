@@ -155,6 +155,9 @@ pub enum ControlMethod {
 
     /// 推送统计信息
     PushStats,
+
+    /// 推送异常通知
+    PushException,
 }
 
 impl std::str::FromStr for ControlMethod {
@@ -167,20 +170,24 @@ impl std::str::FromStr for ControlMethod {
             "heartbeat" => Ok(ControlMethod::Heartbeat),
             "push_config_status" => Ok(ControlMethod::PushConfigStatus),
             "push_stats" => Ok(ControlMethod::PushStats),
+            "push_exception" => Ok(ControlMethod::PushException),
             _ => Err(anyhow::anyhow!("Unknown control method: {}", s)),
         }
     }
 }
 
-impl ControlMethod {
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ControlMethod::Authenticate => "authenticate",
-            ControlMethod::SubmitConfig => "submit_config",
-            ControlMethod::Heartbeat => "heartbeat",
-            ControlMethod::PushConfigStatus => "push_config_status",
-            ControlMethod::PushStats => "push_stats",
-        }
-    }
+/// 异常通知参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExceptionNotification {
+    /// 异常级别: "error", "warning", "info"
+    pub level: String,
+    /// 异常消息
+    pub message: String,
+    /// 异常代码（可选）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// 附加数据（可选）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
+

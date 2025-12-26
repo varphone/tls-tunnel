@@ -1,5 +1,5 @@
 mod config;
-mod connection;
+pub mod connection;
 mod control_channel;
 mod registry;
 mod stats;
@@ -7,6 +7,7 @@ mod visitor;
 mod yamux;
 
 pub use registry::ProxyRegistry;
+pub use connection::ExceptionNotification;
 
 use crate::config::ServerConfig;
 use crate::stats::StatsManager;
@@ -221,6 +222,8 @@ struct ServerWorld {
     shutdown_tx: broadcast::Sender<()>,
     proxy_keys: Vec<(String, u16)>,
     client_id: Option<String>,
+    exception_tx: mpsc::UnboundedSender<connection::ExceptionNotification>,
+    exception_rx: mpsc::UnboundedReceiver<connection::ExceptionNotification>,
 }
 
 impl ServerWorld {
@@ -265,6 +268,9 @@ async fn handle_client_transport(
     // 创建broadcast channel用于监控yamux连接状态
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
+    // 创建异常通知通道
+    let (exception_tx, exception_rx) = mpsc::unbounded_channel();
+
     // 创建服务器世界对象（包含 yamux_conn，用于在事件循环中 poll）
     let world = ServerWorld {
         yamux_conn,
@@ -275,6 +281,8 @@ async fn handle_client_transport(
         shutdown_tx,
         proxy_keys: Vec::new(),
         client_id: None,
+        exception_tx,
+        exception_rx,
     };
 
     // 运行统一事件循环
@@ -378,6 +386,21 @@ async fn handle_proxy_config_submission(
     // 如果所有代理都会被拒绝
     if !proxies.is_empty() && rejected_proxies.len() == proxies.len() {
         error!("All proxies rejected: {}", rejected_proxies.join(", "));
+        
+        // 发送异常通知给客户端
+        let _ = control_channel
+            .send_exception_notification(
+                control_stream,
+                "error",
+                format!("所有代理配置被拒绝：{}", rejected_proxies.join(", ")),
+                Some("ALL_PROXIES_REJECTED".to_string()),
+                Some(serde_json::json!({
+                    "rejected_proxies": &rejected_proxies,
+                    "reason": "端口或名称冲突"
+                }))
+            )
+            .await;
+        
         control_channel
             .send_config_rejected(control_stream, id, rejected_proxies)
             .await?;
@@ -445,7 +468,7 @@ async fn handle_proxy_config_submission(
 
     // 合并被拒绝的 proxies 和 visitors
     let mut all_rejected = rejected_proxies.clone();
-    all_rejected.extend(rejected_visitors);
+    all_rejected.extend(rejected_visitors.clone());
 
     // 发送响应
     if all_rejected.is_empty() {
@@ -458,6 +481,22 @@ async fn handle_proxy_config_submission(
             "Partially accepted: {} item(s) rejected",
             all_rejected.len()
         );
+        
+        // 发送警告通知
+        let _ = control_channel
+            .send_exception_notification(
+                control_stream,
+                "warning",
+                format!("部分配置被拒绝：{} 项", all_rejected.len()),
+                Some("PARTIAL_CONFIG_REJECTION".to_string()),
+                Some(serde_json::json!({
+                    "rejected_items": &all_rejected,
+                    "rejected_proxies": &rejected_proxies,
+                    "rejected_visitors": &rejected_visitors
+                }))
+            )
+            .await;
+        
         control_channel
             .send_config_partially_rejected(control_stream, id, all_rejected)
             .await?;
@@ -498,10 +537,11 @@ async fn start_proxy_listeners_for_world(
         let mut shutdown_rx = world.shutdown_tx.subscribe();
         let stats_manager = world.state.stats_manager.clone();
         let proxy_name = proxy_info.name.clone();
+        let exception_tx = world.exception_tx.clone();
 
         tokio::spawn(async move {
             tokio::select! {
-                result = start_proxy_listener_with_notify(proxy_info, stream_tx_clone, tracker, None) => {
+                result = start_proxy_listener_with_notify(proxy_info, stream_tx_clone, tracker, Some(exception_tx)) => {
                     if let Err(e) = result {
                         error!("Proxy listener error: {}", e);
                     }
@@ -675,6 +715,22 @@ async fn run_server_event_loop(
                         error!("Failed to create yamux stream: {}", e);
                         // visitor handler 会超时处理
                     }
+                }
+            }
+
+            // 5. 处理异常通知（从代理监听器发送过来的）
+            Some(exception_req) = world.exception_rx.recv() => {
+                if let Err(e) = control_channel
+                    .send_exception_notification(
+                        &mut control_stream,
+                        &exception_req.level,
+                        exception_req.message,
+                        exception_req.code,
+                        exception_req.data,
+                    )
+                    .await
+                {
+                    warn!("Failed to send exception notification: {}", e);
                 }
             }
         }

@@ -136,6 +136,8 @@ impl ClientControlChannel {
 
     /// 处理通知消息（服务端推送）
     pub async fn handle_notification(&mut self, request: JsonRpcRequest) -> Result<()> {
+        use tracing::{error, info, warn};
+
         debug!("Received notification: {}", request.method);
 
         match request.method.as_str() {
@@ -144,6 +146,47 @@ impl ClientControlChannel {
             }
             "stats_push" => {
                 debug!("Stats push params: {:?}", request.params);
+            }
+            "push_exception" => {
+                // 解析异常通知
+                if let Ok(exception) =
+                    serde_json::from_value::<ExceptionNotification>(request.params.clone())
+                {
+                    match exception.level.as_str() {
+                        "error" => {
+                            error!(
+                                "Server exception: {} {}",
+                                exception.code.as_deref().unwrap_or(""),
+                                exception.message
+                            );
+                            if let Some(data) = exception.data {
+                                error!("Exception data: {}", data);
+                            }
+                        }
+                        "warning" => {
+                            warn!(
+                                "Server warning: {} {}",
+                                exception.code.as_deref().unwrap_or(""),
+                                exception.message
+                            );
+                            if let Some(data) = exception.data {
+                                warn!("Warning data: {}", data);
+                            }
+                        }
+                        _ => {
+                            info!(
+                                "Server notification: {} {}",
+                                exception.code.as_deref().unwrap_or(""),
+                                exception.message
+                            );
+                            if let Some(data) = exception.data {
+                                info!("Notification data: {}", data);
+                            }
+                        }
+                    }
+                } else {
+                    warn!("Failed to parse exception notification: {:?}", request.params);
+                }
             }
             _ => {
                 warn!("Unknown notification method: {}", request.method);
