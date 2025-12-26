@@ -528,24 +528,19 @@ async fn run_server_event_loop(
 
     // 首先等待客户端创建控制流
     info!("Waiting for control stream from client");
-    let mut control_stream = loop {
-        tokio::select! {
-            stream_result = poll_fn(|cx| world.yamux_conn.poll_next_inbound(cx)) => {
-                match stream_result {
-                    Some(Ok(stream)) => {
-                        info!("Control stream established");
-                        break stream;
-                    }
-                    Some(Err(e)) => {
-                        error!("Failed to accept control stream: {}", e);
-                        return Err(anyhow::anyhow!("Failed to accept control stream: {}", e));
-                    }
-                    None => {
-                        error!("Yamux connection closed before control stream was established");
-                        return Err(anyhow::anyhow!("Connection closed"));
-                    }
-                }
-            }
+    let stream_result = poll_fn(|cx| world.yamux_conn.poll_next_inbound(cx)).await;
+    let mut control_stream = match stream_result {
+        Some(Ok(stream)) => {
+            info!("Control stream established");
+            stream
+        }
+        Some(Err(e)) => {
+            error!("Failed to accept control stream: {}", e);
+            return Err(anyhow::anyhow!("Failed to accept control stream: {}", e));
+        }
+        None => {
+            error!("Yamux connection closed before control stream was established");
+            return Err(anyhow::anyhow!("Connection closed"));
         }
     };
 

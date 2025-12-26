@@ -157,9 +157,10 @@ pub enum ControlMethod {
     PushStats,
 }
 
-impl ControlMethod {
-    /// 从字符串解析
-    pub fn from_str(s: &str) -> anyhow::Result<Self> {
+impl std::str::FromStr for ControlMethod {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
         match s {
             "authenticate" => Ok(ControlMethod::Authenticate),
             "submit_config" => Ok(ControlMethod::SubmitConfig),
@@ -169,7 +170,9 @@ impl ControlMethod {
             _ => Err(anyhow::anyhow!("Unknown control method: {}", s)),
         }
     }
+}
 
+impl ControlMethod {
     /// 转换为字符串
     pub fn as_str(&self) -> &'static str {
         match self {

@@ -3,6 +3,7 @@ use crate::control_protocol::*;
 use anyhow::{Context, Result};
 use futures::io::{AsyncReadExt as FuturesAsyncReadExt, AsyncWriteExt as FuturesAsyncWriteExt};
 use serde_json::json;
+use std::str::FromStr;
 use tracing::{debug, warn};
 
 /// 服务端控制通道事件

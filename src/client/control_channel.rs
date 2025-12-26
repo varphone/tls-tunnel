@@ -32,6 +32,7 @@ pub enum ControlEvent {
     ConfigRejected { rejected_proxies: Vec<String> },
 
     /// 连接关闭
+    #[allow(dead_code)]
     ConnectionClosed,
 }
 
