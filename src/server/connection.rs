@@ -1,48 +1,96 @@
 use super::registry::{ConnectionGuard, ProxyInfo};
+use crate::protocol::ProxyStatusUpdate;
 use crate::stats::ProxyStatsTracker;
 use anyhow::{Context, Result};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{error, info, warn};
 
-/// 启动代理监听器
-pub async fn start_proxy_listener(
+const MAX_BIND_RETRIES: u32 = 10;
+const INITIAL_RETRY_DELAY_SECS: u64 = 2;
+const MAX_RETRY_DELAY_SECS: u64 = 60;
+pub async fn start_proxy_listener_with_notify(
+    proxy: ProxyInfo,
+    stream_tx: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
+    tracker: ProxyStatsTracker,
+    _status_tx: Option<mpsc::Sender<ProxyStatusUpdate>>,
+) -> Result<()> {
+    let addr = format!("{}:{}", proxy.publish_addr, proxy.publish_port);
+    let proxy_name = proxy.name.clone();
+    let mut retry_count = 0;
+    let mut retry_delay = INITIAL_RETRY_DELAY_SECS;
+
+    loop {
+        // 尝试绑定
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                info!(
+                    "Proxy '{}' listening on {}:{} (after {} retries)",
+                    proxy_name, proxy.publish_addr, proxy.publish_port, retry_count
+                );
+
+                // 启动监听循环
+                return handle_listener_loop(
+                    listener, proxy, stream_tx, tracker,
+                )
+                .await;
+            }
+            Err(e) => {
+                retry_count += 1;
+
+                let error_msg = match e.kind() {
+                    std::io::ErrorKind::AddrInUse => {
+                        format!(
+                            "Port {} is already in use by another process",
+                            proxy.publish_port
+                        )
+                    }
+                    std::io::ErrorKind::PermissionDenied => {
+                        format!(
+                            "Permission denied to bind to {}:{} - may need administrator privileges",
+                            proxy.publish_addr, proxy.publish_port
+                        )
+                    }
+                    _ => format!("Failed to bind proxy listener on {}: {}", addr, e),
+                };
+
+                if retry_count <= MAX_BIND_RETRIES {
+                    warn!(
+                        "Proxy '{}' bind failed (attempt {}/{}): {}. Retrying in {} seconds...",
+                        proxy_name, retry_count, MAX_BIND_RETRIES, error_msg, retry_delay
+                    );
+
+                    sleep(Duration::from_secs(retry_delay)).await;
+
+                    // 指数退避：下次等待时间翻倍，但不超过最大值
+                    retry_delay = std::cmp::min(retry_delay * 2, MAX_RETRY_DELAY_SECS);
+                } else {
+                    error!(
+                        "Proxy '{}' bind failed after {} retries: {}",
+                        proxy_name, MAX_BIND_RETRIES, error_msg
+                    );
+
+                    return Err(anyhow::anyhow!(
+                        "Failed to bind proxy '{}' after {} retries: {}",
+                        proxy_name,
+                        MAX_BIND_RETRIES,
+                        error_msg
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// 处理监听器接受连接的主循环
+async fn handle_listener_loop(
+    listener: tokio::net::TcpListener,
     proxy: ProxyInfo,
     stream_tx: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
     tracker: ProxyStatsTracker,
 ) -> Result<()> {
-    let addr = format!("{}:{}", proxy.publish_addr, proxy.publish_port);
-
-    // 尝试绑定，如果失败则提供更详细的错误信息
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
-        Err(e) => {
-            let error_msg = match e.kind() {
-                std::io::ErrorKind::AddrInUse => {
-                    format!(
-                        "Port {} is already in use by another process. \
-                         Please check with 'netstat -ano | findstr :{}' or free the port and retry.",
-                        proxy.publish_port, proxy.publish_port
-                    )
-                }
-                std::io::ErrorKind::PermissionDenied => {
-                    format!(
-                        "Permission denied to bind to {}:{} - you may need administrator privileges for ports < 1024",
-                        proxy.publish_addr, proxy.publish_port
-                    )
-                }
-                _ => format!("Failed to bind proxy listener on {}: {}", addr, e),
-            };
-            return Err(anyhow::anyhow!(error_msg));
-        }
-    };
-
-    info!(
-        "Proxy '{}' listening on {}:{}",
-        proxy.name, proxy.publish_addr, proxy.publish_port
-    );
-
     loop {
         match listener.accept().await {
             Ok((inbound, _peer_addr)) => {
@@ -68,6 +116,7 @@ pub async fn start_proxy_listener(
             }
             Err(e) => {
                 error!("Proxy '{}' accept error: {}", proxy.name, e);
+                // 继续接受新连接，不中断监听
             }
         }
     }

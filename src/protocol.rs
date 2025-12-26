@@ -105,6 +105,33 @@ impl ConfigStatusResponse {
     }
 }
 
+/// 代理健康状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyHealthStatus {
+    /// 正常工作
+    Healthy,
+    /// 暂时不可用，正在重试
+    Unhealthy,
+    /// 绑定端口失败
+    BindFailed,
+}
+
+/// 代理状态更新消息（服务器实时通知客户端代理状态变化）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyStatusUpdate {
+    /// 代理名称
+    pub proxy_name: String,
+    /// 代理状态
+    pub status: ProxyHealthStatus,
+    /// 错误信息（如果状态为不健康）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// 如果绑定失败，表示下一次重试的秒数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

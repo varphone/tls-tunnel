@@ -25,7 +25,6 @@ use tracing::{error, info, warn};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 
 use config::{read_client_configs, validate_proxy_configs};
-use connection::start_proxy_listener;
 use stats::start_stats_server;
 use yamux::run_yamux_connection;
 
@@ -432,8 +431,9 @@ async fn handle_client_transport(
         let proxy_name = proxy.name.clone();
 
         listener_tasks.spawn(async move {
+            // 使用支持状态通知的函数（虽然当前版本中暂不使用状态通知）
             tokio::select! {
-                result = start_proxy_listener(proxy, stream_tx_clone, tracker) => {
+                result = connection::start_proxy_listener_with_notify(proxy, stream_tx_clone, tracker, None) => {
                     if let Err(e) = result {
                         error!("Proxy listener error: {}", e);
                     }
