@@ -220,11 +220,7 @@ impl GeoIpRouter {
     }
 
     /// 查询 IP 地址的国家代码
-    fn lookup_country(
-        &self,
-        reader: &Reader<Vec<u8>>,
-        ip: IpAddr,
-    ) -> Result<Option<String>> {
+    fn lookup_country(&self, reader: &Reader<Vec<u8>>, ip: IpAddr) -> Result<Option<String>> {
         // maxminddb 0.27: 使用 decode() 方法从 LookupResult 反序列化
         let lookup_result = reader.lookup(ip)?;
         let country_opt: Option<geoip2::Country> = lookup_result.decode()?;

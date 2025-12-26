@@ -133,7 +133,7 @@ pub async fn handle_proxy_connection(
 
     // 使用 join! 而不是 select!，确保两个方向都完成传输
     let (result1, result2) = tokio::join!(inbound_to_stream, stream_to_inbound);
-    
+
     if let Err(e) = result1 {
         warn!("Error copying inbound to stream: {}", e);
     }

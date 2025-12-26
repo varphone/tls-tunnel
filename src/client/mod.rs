@@ -414,9 +414,13 @@ async fn run_client_session(
             };
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    forwarder::run_forwarder_listener(forwarder_clone, stream_tx_clone, router, stats_tracker)
-                        .await
+                if let Err(e) = forwarder::run_forwarder_listener(
+                    forwarder_clone,
+                    stream_tx_clone,
+                    router,
+                    stats_tracker,
+                )
+                .await
                 {
                     error!("Forwarder '{}' listener error: {}", forwarder_name, e);
                 }
