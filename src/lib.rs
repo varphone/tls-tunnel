@@ -5,6 +5,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod connection_pool;
+pub mod control_protocol;
 pub mod error;
 pub mod io_util;
 pub mod limited_reader;

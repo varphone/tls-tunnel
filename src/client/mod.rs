@@ -1,5 +1,6 @@
 mod config;
 mod connection;
+mod control_channel;
 mod forwarder;
 mod geoip;
 mod stats;
@@ -8,7 +9,6 @@ mod visitor;
 
 use crate::config::{ClientFullConfig, ProxyType};
 use crate::connection_pool::ConnectionPool;
-use crate::protocol::{AuthRequest, AuthResponse, ConfigStatusResponse, ConfigValidationResponse};
 use crate::transport::create_transport_client;
 use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
 use anyhow::{Context, Result};
@@ -16,15 +16,14 @@ use async_trait::async_trait;
 use futures::future::poll_fn;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, interval};
 use tokio_rustls::TlsConnector;
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use config::get_reconnect_delay;
 use connection::get_pool_config;
-use stream::{handle_stream, send_client_config};
+use stream::handle_stream;
 use visitor::run_visitor_listener;
 
 pub use forwarder::ForwarderHandler;
@@ -225,156 +224,9 @@ async fn run_client_session(
     );
 
     // 将 Pin<Box<dyn Transport>> 转换为可用的流
-    let mut tls_stream = transport_stream;
+    let tls_stream = transport_stream;
 
     info!("Transport connection established");
-
-    // 发送认证请求（JSON 格式，带长度前缀）
-    let auth_request = AuthRequest {
-        auth_key: client_config.auth_key.clone(),
-    };
-    let request_json = serde_json::to_vec(&auth_request)?;
-    tls_stream
-        .write_all(&(request_json.len() as u32).to_be_bytes())
-        .await?;
-    tls_stream.write_all(&request_json).await?;
-    tls_stream.flush().await?;
-
-    info!("Sent authentication request");
-
-    // 接收认证响应（JSON 格式，带长度前缀）
-    let mut len_buf = [0u8; 4];
-    tls_stream.read_exact(&mut len_buf).await?;
-    let response_len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut response_buf = vec![0u8; response_len];
-    tls_stream.read_exact(&mut response_buf).await?;
-
-    let auth_response: AuthResponse = serde_json::from_slice(&response_buf)
-        .context("Failed to parse authentication response JSON")?;
-
-    if !auth_response.success {
-        let error_msg = auth_response
-            .error
-            .unwrap_or_else(|| "Unknown authentication error".to_string());
-        error!("Authentication failed: {}", error_msg);
-        return Err(anyhow::anyhow!("Authentication failed: {}", error_msg));
-    }
-
-    info!("Authentication successful");
-
-    send_client_config(&config, &mut tls_stream).await?;
-
-    // 接收配置验证响应（JSON 格式，带长度前缀）
-    let mut len_buf = [0u8; 4];
-    tls_stream.read_exact(&mut len_buf).await?;
-    let response_len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut response_buf = vec![0u8; response_len];
-    tls_stream.read_exact(&mut response_buf).await?;
-
-    let validation_response: ConfigValidationResponse = serde_json::from_slice(&response_buf)
-        .context("Failed to parse configuration validation response JSON")?;
-
-    if !validation_response.valid {
-        let error_msg = validation_response
-            .error
-            .unwrap_or_else(|| "Unknown validation error".to_string());
-        error!("Server rejected proxy configuration: {}", error_msg);
-        return Err(anyhow::anyhow!(
-            "Proxy configuration rejected: {}",
-            error_msg
-        ));
-    }
-
-    info!("Server accepted proxy configurations");
-
-    // 接收配置状态响应（JSON 格式，带长度前缀）
-    let mut len_buf = [0u8; 4];
-    tls_stream.read_exact(&mut len_buf).await?;
-    let response_len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut response_buf = vec![0u8; response_len];
-    tls_stream.read_exact(&mut response_buf).await?;
-
-    let status_response: ConfigStatusResponse = serde_json::from_slice(&response_buf)
-        .context("Failed to parse config status response JSON")?;
-
-    // 如果所有代理都被拒绝，返回错误
-    if !status_response.accepted {
-        let error_msg = format!(
-            "All proxies were rejected by server (already registered by other clients): {}",
-            status_response.rejected_proxies.join(", ")
-        );
-        error!("{}", error_msg);
-        return Err(anyhow::anyhow!(error_msg));
-    }
-
-    // 如果有部分代理被拒绝，记录警告
-    if status_response.has_rejected() {
-        warn!(
-            "Server rejected {} proxy(ies), already registered by other clients: {}",
-            status_response.rejected_proxies.len(),
-            status_response.rejected_proxies.join(", ")
-        );
-    }
-
-    // 为每个代理创建统计跟踪器
-    for proxy in &config.proxies {
-        let tracker = stats::ClientStatsTracker::new(
-            proxy.name.clone(),
-            proxy.proxy_type,
-            "127.0.0.1".to_string(), // 本地监听地址
-            proxy.local_port,
-            client_config.server_addr.clone(),
-            proxy.publish_port,
-        );
-        stats_manager.add_or_update_tracker(tracker);
-    }
-
-    // 创建连接池
-    let pool_config = get_pool_config().await;
-
-    // 为每个代理创建独立的连接池配置（使用 publish_port 作为键）
-    let proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>> = Arc::new(
-        config
-            .proxies
-            .iter()
-            .map(|proxy| {
-                let mut pool_cfg = pool_config.clone();
-                pool_cfg.reuse_connections = proxy.proxy_type.should_reuse_connections();
-
-                // HTTP/2.0 需要单连接多路复用，调整池大小
-                if proxy.proxy_type.is_multiplexed() {
-                    pool_cfg.max_size = 1;
-                    pool_cfg.min_idle = 1;
-                }
-
-                let pool = Arc::new(ConnectionPool::new(pool_cfg));
-                (proxy.publish_port, pool)
-            })
-            .collect(),
-    );
-
-    // 预热连接池
-    info!(
-        "Warming up connection pools for {} proxies...",
-        config.proxies.len()
-    );
-    for proxy in &config.proxies {
-        let local_addr = format!("127.0.0.1:{}", proxy.local_port);
-        if let Some(pool) = proxy_pools.get(&proxy.publish_port) {
-            if let Err(e) = pool.warmup(&local_addr).await {
-                warn!("Failed to warm up pool for proxy '{}': {}", proxy.name, e);
-            }
-        }
-    }
-
-    // 启动后台清理任务
-    for pool in proxy_pools.values() {
-        let pool_clone = pool.clone();
-        pool_clone.start_cleanup_task(Duration::from_secs(30));
-    }
 
     // 建立 yamux 连接（使用兼容层）
     let yamux_config = YamuxConfig::default();
@@ -383,143 +235,367 @@ async fn run_client_session(
 
     info!("Yamux connection established");
 
+    // 创建控制流（yamux 的第一个流）
+    let control_stream = poll_fn(|cx| yamux_conn.poll_new_outbound(cx))
+        .await
+        .context("Failed to create control stream")?;
+
+    info!("Control stream created");
+
+    // 创建控制通道
+    let (control_channel, event_rx) = control_channel::ClientControlChannel::new(config.clone());
+    let config = Arc::new(config);
+
     // 创建channel用于visitor请求新的yamux stream
-    let (visitor_stream_tx, mut visitor_stream_rx) =
+    let (visitor_stream_tx, visitor_stream_rx) =
         tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>(100);
 
     // 创建广播channel用于通知所有监听器连接已断开
     let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
 
-    // 启动 visitor 监听器
-    if !config.visitors.is_empty() {
-        info!("Starting {} visitor listeners...", config.visitors.len());
+    // 创建心跳定时器
+    let mut heartbeat_interval = interval(Duration::from_secs(30));
+    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        for visitor in &config.visitors {
-            let visitor_clone = visitor.clone();
-            let visitor_name = visitor.name.clone();
-            let stream_tx_clone = visitor_stream_tx.clone();
-            let shutdown_rx = shutdown_tx.subscribe();
+    // 创建客户端世界对象
+    let world = ClientWorld {
+        yamux_conn,
+        control_stream,
+        control_channel,
+        event_rx,
+        visitor_stream_rx,
+        config,
+        stats_manager,
+        visitor_stream_tx,
+        shutdown_tx,
+        state: ClientState::Authenticating,
+        heartbeat_interval,
+        proxy_pools: None,
+    };
 
-            tokio::spawn(async move {
-                if let Err(e) =
-                    run_visitor_listener(visitor_clone, stream_tx_clone, shutdown_rx).await
-                {
-                    error!("Visitor '{}' listener error: {}", visitor_name, e);
-                }
-            });
-        }
-    }
-
-    // 启动 forwarder 监听器
-    if !config.forwarders.is_empty() {
-        info!(
-            "Starting {} forwarder listeners...",
-            config.forwarders.len()
-        );
-
-        // 为每个 forwarder 创建统计跟踪器
-        for forwarder in &config.forwarders {
-            let tracker = stats::ClientStatsTracker::new(
-                forwarder.name.clone(),
-                forwarder.proxy_type,
-                forwarder.bind_addr.clone(),
-                forwarder.bind_port,
-                client_config.server_addr.clone(),
-                0, // forwarder 没有固定的 target_port
-            );
-            stats_manager.add_or_update_tracker(tracker);
-        }
-
-        // 为每个 forwarder 创建对应的 GeoIP 路由器
-        for forwarder in &config.forwarders {
-            let forwarder_clone = forwarder.clone();
-            let forwarder_name = forwarder.name.clone();
-            let stream_tx_clone = visitor_stream_tx.clone(); // 复用同一个 channel
-            let shutdown_rx = shutdown_tx.subscribe();
-            let stats_tracker = stats_manager.get_tracker(&forwarder.name);
-
-            // 如果配置了路由策略，创建 GeoIP 路由器
-            let router = if let Some(ref routing_config) = forwarder.routing {
-                match geoip::GeoIpRouter::new(routing_config.clone()) {
-                    Ok(router) => {
-                        info!(
-                            "Forwarder '{}': GeoIP routing enabled (direct_countries: {:?}, default: {:?})",
-                            forwarder_name,
-                            routing_config.direct_countries,
-                            routing_config.default_strategy
-                        );
-                        Some(Arc::new(router))
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Forwarder '{}': Failed to initialize GeoIP router: {}. All traffic will use proxy.",
-                            forwarder_name, e
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            tokio::spawn(async move {
-                if let Err(e) = forwarder::run_forwarder_listener(
-                    forwarder_clone,
-                    stream_tx_clone,
-                    router,
-                    stats_tracker,
-                    shutdown_rx,
-                )
-                .await
-                {
-                    error!("Forwarder '{}' listener error: {}", forwarder_name, e);
-                }
-            });
-        }
-    }
-
-    // Handle stream requests from server and visitor stream requests
-    loop {
-        tokio::select! {
-            // 处理服务器发来的 inbound stream 请求（正常的 proxy 模式）
-            stream_result = poll_fn(|cx| yamux_conn.poll_next_inbound(cx)) => {
-                match stream_result {
-                    Some(Ok(stream)) => {
-                        info!("Received new stream from server");
-
-                        let config = config.clone();
-                        let proxy_pools = proxy_pools.clone();
-                        let stats_mgr = stats_manager.clone();
-
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_stream(stream, config, proxy_pools, stats_mgr).await {
-                                error!("Stream handling error: {}", e);
-                            }
-                        });
-                    }
-                    Some(Err(e)) => {
-                        error!("Yamux error: {}", e);
-                        // 通知所有监听器连接已断开
-                        let _ = shutdown_tx.send(());
-                        break;
-                    }
-                    None => {
-                        info!("Yamux connection closed by server");
-                        // 通知所有监听器连接已断开
-                        let _ = shutdown_tx.send(());
-                        break;
-                    }
-                }
-            }
-
-            // 处理 visitor 请求创建新的 outbound stream
-            Some(response_tx) = visitor_stream_rx.recv() => {
-                let stream_result = poll_fn(|cx| yamux_conn.poll_new_outbound(cx)).await;
-                let _ = response_tx.send(stream_result.map_err(|e| anyhow::anyhow!("Failed to create yamux stream: {}", e)));
-            }
-        }
-    }
+    // 运行统一事件循环
+    run_client_event_loop(world).await?;
 
     info!("Client disconnected");
     Ok(())
 }
+
+/// 客户端状态
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum ClientState {
+    Authenticating,
+    Authenticated,
+    ConfiguringProxy,
+    Running,
+}
+
+/// 客户端世界 - 统一管理所有共享资源
+struct ClientWorld {
+    yamux_conn: YamuxConnection<tokio_util::compat::Compat<std::pin::Pin<Box<dyn crate::transport::Transport>>>>,
+    control_stream: yamux::Stream,
+    control_channel: control_channel::ClientControlChannel,
+    event_rx: tokio::sync::mpsc::UnboundedReceiver<control_channel::ControlEvent>,
+    visitor_stream_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    config: Arc<ClientFullConfig>,
+    stats_manager: stats::ClientStatsManager,
+    visitor_stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    state: ClientState,
+    heartbeat_interval: tokio::time::Interval,
+    proxy_pools: Option<Arc<HashMap<u16, Arc<ConnectionPool>>>>,
+}
+
+impl ClientWorld {
+    /// 处理控制通道事件
+    async fn handle_control_event(&mut self, event: control_channel::ControlEvent) -> Result<bool> {
+        match event {
+            control_channel::ControlEvent::AuthenticationSuccess { client_id } => {
+                info!("✓ Authentication successful: {}", client_id);
+                self.state = ClientState::Authenticated;
+                self.initialize_resources().await?;
+                self.submit_config().await?;
+                Ok(true)
+            }
+
+            control_channel::ControlEvent::AuthenticationFailed { reason } => {
+                error!("✗ Authentication failed: {}", reason);
+                Err(anyhow::anyhow!("Authentication failed: {}", reason))
+            }
+
+            control_channel::ControlEvent::ConfigAccepted => {
+                info!("✓ Configuration accepted by server");
+                self.state = ClientState::Running;
+                self.start_listeners().await?;
+                Ok(true)
+            }
+
+            control_channel::ControlEvent::ConfigPartiallyRejected { rejected_proxies } => {
+                warn!("⚠ Some proxies rejected: {}", rejected_proxies.join(", "));
+                self.state = ClientState::Running;
+                self.start_listeners().await?;
+                Ok(true)
+            }
+
+            control_channel::ControlEvent::ConfigRejected { rejected_proxies } => {
+                error!("✗ All proxies rejected: {}", rejected_proxies.join(", "));
+                Err(anyhow::anyhow!("All proxies rejected"))
+            }
+
+            control_channel::ControlEvent::ConnectionClosed => {
+                warn!("Control channel closed by server");
+                let _ = self.shutdown_tx.send(());
+                Ok(false)
+            }
+        }
+    }
+
+    /// 初始化资源（连接池、统计跟踪器）
+    async fn initialize_resources(&mut self) -> Result<()> {
+        info!("Initializing connection pools");
+
+        // 创建连接池
+        let pool_config = get_pool_config().await;
+        let pools: HashMap<u16, Arc<ConnectionPool>> = self.config
+            .proxies
+            .iter()
+            .map(|proxy| {
+                let mut pool_cfg = pool_config.clone();
+                pool_cfg.reuse_connections = proxy.proxy_type.should_reuse_connections();
+                if proxy.proxy_type.is_multiplexed() {
+                    pool_cfg.max_size = 1;
+                    pool_cfg.min_idle = 1;
+                }
+                let pool = Arc::new(ConnectionPool::new(pool_cfg));
+                (proxy.publish_port, pool)
+            })
+            .collect();
+
+        // 预热连接池
+        for proxy in &self.config.proxies {
+            let local_addr = format!("127.0.0.1:{}", proxy.local_port);
+            if let Some(pool) = pools.get(&proxy.publish_port) {
+                if let Err(e) = pool.warmup(&local_addr).await {
+                    warn!("Failed to warm up pool for '{}': {}", proxy.name, e);
+                }
+            }
+        }
+
+        // 启动清理任务
+        for pool in pools.values() {
+            pool.clone().start_cleanup_task(Duration::from_secs(30));
+        }
+
+        self.proxy_pools = Some(Arc::new(pools));
+
+        // 为每个代理创建统计跟踪器
+        for proxy in &self.config.proxies {
+            let tracker = stats::ClientStatsTracker::new(
+                proxy.name.clone(),
+                proxy.proxy_type,
+                "127.0.0.1".to_string(),
+                proxy.local_port,
+                self.config.client.server_addr.clone(),
+                proxy.publish_port,
+            );
+            self.stats_manager.add_or_update_tracker(tracker);
+        }
+
+        Ok(())
+    }
+
+    /// 提交配置
+    async fn submit_config(&mut self) -> Result<()> {
+        self.state = ClientState::ConfiguringProxy;
+        info!("Submitting proxy configuration");
+        self.control_channel.send_submit_config(&mut self.control_stream).await
+    }
+
+    /// 启动监听器（visitor 和 forwarder）
+    async fn start_listeners(&mut self) -> Result<()> {
+        // 启动 visitor 监听器
+        if !self.config.visitors.is_empty() {
+            info!("Starting {} visitor listeners...", self.config.visitors.len());
+
+            for visitor in &self.config.visitors {
+                let visitor_clone = visitor.clone();
+                let visitor_name = visitor.name.clone();
+                let stream_tx_clone = self.visitor_stream_tx.clone();
+                let shutdown_rx = self.shutdown_tx.subscribe();
+
+                tokio::spawn(async move {
+                    if let Err(e) = run_visitor_listener(visitor_clone, stream_tx_clone, shutdown_rx).await {
+                        error!("Visitor '{}' listener error: {}", visitor_name, e);
+                    }
+                });
+            }
+        }
+
+        // 启动 forwarder 监听器
+        if !self.config.forwarders.is_empty() {
+            info!("Starting {} forwarder listeners...", self.config.forwarders.len());
+
+            for forwarder in &self.config.forwarders {
+                let tracker = stats::ClientStatsTracker::new(
+                    forwarder.name.clone(),
+                    forwarder.proxy_type,
+                    forwarder.bind_addr.clone(),
+                    forwarder.bind_port,
+                    self.config.client.server_addr.clone(),
+                    0,
+                );
+                self.stats_manager.add_or_update_tracker(tracker);
+            }
+
+            for forwarder in &self.config.forwarders {
+                let forwarder_clone = forwarder.clone();
+                let forwarder_name = forwarder.name.clone();
+                let stream_tx_clone = self.visitor_stream_tx.clone();
+                let shutdown_rx = self.shutdown_tx.subscribe();
+                let stats_tracker = self.stats_manager.get_tracker(&forwarder.name);
+
+                let router = if let Some(ref routing_config) = forwarder.routing {
+                    match geoip::GeoIpRouter::new(routing_config.clone()) {
+                        Ok(router) => {
+                            info!("Forwarder '{}': GeoIP routing enabled", forwarder_name);
+                            Some(Arc::new(router))
+                        }
+                        Err(e) => {
+                            warn!("Forwarder '{}': Failed to initialize GeoIP router: {}", forwarder_name, e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                tokio::spawn(async move {
+                    if let Err(e) = forwarder::run_forwarder_listener(
+                        forwarder_clone,
+                        stream_tx_clone,
+                        router,
+                        stats_tracker,
+                        shutdown_rx,
+                    ).await {
+                        error!("Forwarder '{}' listener error: {}", forwarder_name, e);
+                    }
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// 统一的客户端事件循环
+/// 集中处理：yamux I/O、控制通道事件、visitor 请求、心跳等
+async fn run_client_event_loop(mut world: ClientWorld) -> Result<()> {
+    info!("Starting unified client event loop");
+
+    // 开始认证
+    info!("Starting authentication");
+    if let Err(e) = world.control_channel.send_authenticate(&mut world.control_stream).await {
+        error!("Failed to send authentication: {}", e);
+        return Err(e);
+    }
+
+    // 主事件循环
+    loop {
+        tokio::select! {
+            // 1. 处理控制流的读取
+            read_result = world.control_channel.read_message(&mut world.control_stream) => {
+                match read_result {
+                    Ok(Some(message)) => {
+                        if let Err(e) = world.control_channel.handle_notification(message).await {
+                            error!("Failed to handle control message: {}", e);
+                        }
+                    }
+                    Ok(None) => {
+                        info!("Control stream closed by server");
+                        let _ = world.shutdown_tx.send(());
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Control stream read error: {}", e);
+                        let _ = world.shutdown_tx.send(());
+                        break;
+                    }
+                }
+            }
+
+            // 2. 处理控制通道事件
+            event = world.event_rx.recv() => {
+                if let Some(event) = event {
+                    if !world.handle_control_event(event).await? {
+                        break;
+                    }
+                } else {
+                    error!("Control event stream closed");
+                    let _ = world.shutdown_tx.send(());
+                    break;
+                }
+            }
+
+            // 3. 处理 yamux inbound streams（仅在 Running 状态）
+            stream_result = poll_fn(|cx| world.yamux_conn.poll_next_inbound(cx)), if world.state == ClientState::Running => {
+                match stream_result {
+                    Some(Ok(stream)) => {
+                        debug!("Received new stream from server");
+
+                        if let Some(ref pools) = world.proxy_pools {
+                            let config_clone = (*world.config).clone();
+                            let pools_clone = pools.clone();
+                            let mgr_clone = world.stats_manager.clone();
+
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_stream(stream, config_clone, pools_clone, mgr_clone).await {
+                                    error!("Stream handling error: {}", e);
+                                }
+                            });
+                        }
+                    }
+                    Some(Err(e)) => {
+                        error!("Yamux error: {}", e);
+                        let _ = world.shutdown_tx.send(());
+                        break;
+                    }
+                    None => {
+                        info!("Yamux connection closed by server");
+                        let _ = world.shutdown_tx.send(());
+                        break;
+                    }
+                }
+            }
+
+            // 4. 处理 visitor outbound stream 请求
+            Some(response_tx) = world.visitor_stream_rx.recv() => {
+                let stream_result = poll_fn(|cx| world.yamux_conn.poll_new_outbound(cx)).await;
+                let _ = response_tx.send(
+                    stream_result.map_err(|e| anyhow::anyhow!("Failed to create yamux stream: {}", e))
+                );
+            }
+
+            // 5. 定时心跳（仅在 Running 状态）
+            _ = world.heartbeat_interval.tick(), if world.state == ClientState::Running => {
+                debug!("Sending heartbeat");
+                if let Err(e) = world.control_channel.send_heartbeat(&mut world.control_stream).await {
+                    warn!("Failed to send heartbeat: {}", e);
+                }
+            }
+        }
+    }
+
+    info!("Client event loop ended");
+    Ok(())
+}
+
+/// 旧版本的主循环（待删除）
+#[allow(dead_code)]
+async fn run_old_main_loop(
+    config: Arc<ClientFullConfig>,
+    _proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>>,
+) -> Result<()> {
+    // 已重构到 run_client_event_loop
+    warn!("run_old_main_loop is deprecated");
+    Ok(())
+}
+
