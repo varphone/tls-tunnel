@@ -26,6 +26,9 @@ pub enum TransportType {
     Http2,
     /// WebSocket Secure
     Wss,
+    /// 未知传输类型（向前兼容）
+    #[serde(other)]
+    Unknown,
 }
 
 impl std::fmt::Display for TransportType {
@@ -34,6 +37,7 @@ impl std::fmt::Display for TransportType {
             TransportType::Tls => write!(f, "tls"),
             TransportType::Http2 => write!(f, "http2"),
             TransportType::Wss => write!(f, "wss"),
+            TransportType::Unknown => write!(f, "unknown"),
         }
     }
 }
@@ -46,6 +50,7 @@ impl std::str::FromStr for TransportType {
             "tls" => Ok(Self::Tls),
             "http2" | "h2" => Ok(Self::Http2),
             "wss" | "websocket" => Ok(Self::Wss),
+            "unknown" => Ok(Self::Unknown),
             _ => anyhow::bail!("Unknown transport type: {}", s),
         }
     }

@@ -97,12 +97,29 @@ pub struct JsonRpcError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticateParams {
     pub auth_key: String,
+    /// 客户端协议版本（如 "1.4.1"）
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: String,
+}
+
+fn default_protocol_version() -> String {
+    "1.4.0".to_string() // 默认为旧版本，保持向后兼容
 }
 
 /// 认证响应结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticateResult {
     pub client_id: String,
+    /// 服务器协议版本
+    #[serde(default = "default_server_protocol_version")]
+    pub protocol_version: String,
+    /// 服务器支持的最小客户端版本（可选）
+    #[serde(default)]
+    pub min_client_version: Option<String>,
+}
+
+fn default_server_protocol_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// 提交配置请求参数

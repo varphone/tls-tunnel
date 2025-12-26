@@ -155,6 +155,9 @@ pub enum RoutingStrategy {
     Direct,
     /// 通过代理
     Proxy,
+    /// 未知策略（向前兼容）
+    #[serde(other)]
+    Unknown,
 }
 
 fn default_routing_strategy() -> RoutingStrategy {

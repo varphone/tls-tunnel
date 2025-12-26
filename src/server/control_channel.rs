@@ -41,6 +41,56 @@ impl ServerControlChannel {
         (channel, event_rx)
     }
 
+    /// 检查协议版本兼容性
+    fn check_protocol_compatibility(&self, client_version: &str) -> Result<()> {
+        // 解析版本号（简单实现，假设格式为 major.minor.patch）
+        let parse_version = |v: &str| -> Result<(u32, u32, u32)> {
+            let parts: Vec<&str> = v.split('.').collect();
+            if parts.len() < 2 {
+                anyhow::bail!("Invalid version format: {}", v);
+            }
+            let major = parts[0].parse::<u32>().unwrap_or(0);
+            let minor = parts[1].parse::<u32>().unwrap_or(0);
+            let patch = parts
+                .get(2)
+                .and_then(|p| p.parse::<u32>().ok())
+                .unwrap_or(0);
+            Ok((major, minor, patch))
+        };
+
+        let server_version = env!("CARGO_PKG_VERSION");
+
+        // 特殊处理：1.4.0 是旧版本默认值，表示客户端未发送版本信息
+        if client_version == "1.4.0" {
+            debug!("Client using default/legacy version (no version info)");
+            return Ok(());
+        }
+
+        match (parse_version(server_version), parse_version(client_version)) {
+            (Ok((s_major, _, _)), Ok((c_major, _, _))) => {
+                if s_major != c_major {
+                    anyhow::bail!(
+                        "Incompatible major version: server={}, client={}",
+                        server_version,
+                        client_version
+                    );
+                }
+                debug!(
+                    "Protocol version compatible: server={}, client={}",
+                    server_version, client_version
+                );
+                Ok(())
+            }
+            _ => {
+                warn!(
+                    "Failed to parse version: server={}, client={}",
+                    server_version, client_version
+                );
+                Ok(()) // 解析失败时继续，只记录警告
+            }
+        }
+    }
+
     /// 读取并处理消息（返回是否需要响应的请求）
     pub async fn read_message(
         &self,
@@ -96,6 +146,23 @@ impl ServerControlChannel {
                 let params: AuthenticateParams = serde_json::from_value(request.params.clone())
                     .context("Invalid authenticate params")?;
 
+                // 记录客户端版本信息
+                debug!(
+                    "Client authentication: version={}, auth_key={}",
+                    params.protocol_version,
+                    if params.auth_key.is_empty() {
+                        "<empty>"
+                    } else {
+                        "<provided>"
+                    }
+                );
+
+                // 版本兼容性检查（可选，目前只记录）
+                if let Err(e) = self.check_protocol_compatibility(&params.protocol_version) {
+                    warn!("Protocol version compatibility warning: {}", e);
+                    // 继续处理，只是警告
+                }
+
                 let id = request.id.clone().unwrap_or(serde_json::Value::Null);
                 let _ = self.event_tx.send(ControlEvent::AuthenticateRequest {
                     id,
@@ -134,7 +201,11 @@ impl ServerControlChannel {
         id: serde_json::Value,
         client_id: String,
     ) -> Result<()> {
-        let result = AuthenticateResult { client_id };
+        let result = AuthenticateResult {
+            client_id,
+            protocol_version: env!("CARGO_PKG_VERSION").to_string(),
+            min_client_version: Some("1.4.0".to_string()),
+        };
 
         let response = JsonRpcResponse {
             jsonrpc: "2.0".to_string(),

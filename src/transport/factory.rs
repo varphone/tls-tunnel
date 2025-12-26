@@ -32,6 +32,9 @@ pub fn create_transport_client(
             config.server_path.clone(),
             connector,
         )),
+        TransportType::Unknown => {
+            anyhow::bail!("Unknown transport type is not supported, please upgrade client or use a supported transport type (tls, http2, wss)")
+        }
     };
 
     Ok(client)
@@ -71,6 +74,9 @@ pub async fn create_transport_server(
             .await
             .context("Failed to bind WebSocket transport server")?;
             Arc::new(server)
+        }
+        TransportType::Unknown => {
+            anyhow::bail!("Unknown transport type is not supported, please upgrade server or use a supported transport type (tls, http2, wss)")
         }
     };
 

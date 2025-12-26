@@ -160,6 +160,7 @@ impl ClientControlChannel {
 
         let params = AuthenticateParams {
             auth_key: self.config.client.auth_key.clone(),
+            protocol_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
         let request = JsonRpcRequest {
@@ -196,6 +197,14 @@ impl ClientControlChannel {
                             if let Ok(auth_result) =
                                 serde_json::from_value::<AuthenticateResult>(result)
                             {
+                                // 记录服务器版本信息
+                                debug!(
+                                    "Authentication successful - client_id: {}, server_version: {}, min_client_version: {:?}",
+                                    auth_result.client_id,
+                                    auth_result.protocol_version,
+                                    auth_result.min_client_version
+                                );
+
                                 let _ = event_tx.send(ControlEvent::AuthenticationSuccess {
                                     client_id: auth_result.client_id,
                                 });
