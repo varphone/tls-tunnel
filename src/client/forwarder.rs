@@ -215,6 +215,7 @@ pub async fn run_forwarder_listener(
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     router: Option<Arc<GeoIpRouter>>,
     stats_tracker: Option<ClientStatsTracker>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<()> {
     let bind_addr = format!("{}:{}", forwarder.bind_addr, forwarder.bind_port);
 
@@ -266,63 +267,72 @@ pub async fn run_forwarder_listener(
     );
 
     loop {
-        match listener.accept().await {
-            Ok((local_stream, peer_addr)) => {
-                // 优化 TCP 选项以降低延迟和防止连接断开
-                if let Err(e) = local_stream.set_nodelay(true) {
-                    warn!("Failed to set TCP_NODELAY: {}", e);
+        tokio::select! {
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((local_stream, peer_addr)) => {
+                        // 优化 TCP 选项以降低延迟和防止连接断开
+                        if let Err(e) = local_stream.set_nodelay(true) {
+                            warn!("Failed to set TCP_NODELAY: {}", e);
+                        }
+
+                        // 尝试获取连接许可
+                        let permit = match connection_limiter.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                warn!(
+                                    "Forwarder '{}': Connection limit reached ({}), rejecting connection from {}",
+                                    forwarder.name, MAX_CONCURRENT_CONNECTIONS, peer_addr
+                                );
+                                // 直接关闭连接
+                                drop(local_stream);
+                                continue;
+                            }
+                        };
+
+                        info!(
+                            "Forwarder '{}': Accepted connection from {}",
+                            forwarder.name, peer_addr
+                        );
+
+                        let forwarder_clone = forwarder.clone();
+                        let stream_tx_clone = stream_tx.clone();
+                        let router_clone = router.clone();
+                        let stats_tracker_clone = stats_tracker.clone();
+                        let failed_target_manager_clone = failed_target_manager.clone();
+                        let connection_pool_clone = connection_pool.clone();
+
+                        tokio::spawn(async move {
+                            // 持有 permit 直到任务结束，自动释放
+                            let _permit = permit;
+                            if let Err(e) = handle_forwarder_connection(
+                                local_stream,
+                                &forwarder_clone,
+                                stream_tx_clone,
+                                router_clone,
+                                stats_tracker_clone,
+                                failed_target_manager_clone,
+                                connection_pool_clone,
+                            )
+                            .await
+                            {
+                                error!(
+                                    "Forwarder '{}' connection handling error: {}",
+                                    forwarder_clone.name, e
+                                );
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Forwarder '{}': Accept error: {}", forwarder.name, e);
+                        sleep(Duration::from_millis(100)).await;
+                    }
                 }
-
-                // 尝试获取连接许可
-                let permit = match connection_limiter.clone().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        warn!(
-                            "Forwarder '{}': Connection limit reached ({}), rejecting connection from {}",
-                            forwarder.name, MAX_CONCURRENT_CONNECTIONS, peer_addr
-                        );
-                        // 直接关闭连接
-                        drop(local_stream);
-                        continue;
-                    }
-                };
-
-                info!(
-                    "Forwarder '{}': Accepted connection from {}",
-                    forwarder.name, peer_addr
-                );
-
-                let forwarder_clone = forwarder.clone();
-                let stream_tx_clone = stream_tx.clone();
-                let router_clone = router.clone();
-                let stats_tracker_clone = stats_tracker.clone();
-                let failed_target_manager_clone = failed_target_manager.clone();
-                let connection_pool_clone = connection_pool.clone();
-
-                tokio::spawn(async move {
-                    // 持有 permit 直到任务结束，自动释放
-                    let _permit = permit;
-                    if let Err(e) = handle_forwarder_connection(
-                        local_stream,
-                        &forwarder_clone,
-                        stream_tx_clone,
-                        router_clone,
-                        stats_tracker_clone,
-                        failed_target_manager_clone,
-                        connection_pool_clone,
-                    )
-                    .await
-                    {
-                        error!(
-                            "Forwarder '{}' connection handling error: {}",
-                            forwarder_clone.name, e
-                        );
-                    }
-                });
             }
-            Err(e) => {
-                error!("Forwarder '{}': Accept error: {}", forwarder.name, e);
-                sleep(Duration::from_millis(100)).await;
+            // 监听 shutdown 信号
+            _ = shutdown_rx.recv() => {
+                info!("Forwarder '{}': Shutting down due to connection loss", forwarder.name);
+                break Ok(());
             }
         }
     }
@@ -1214,8 +1224,11 @@ impl ProxyHandler for ForwarderHandler {
         let status = self.status.clone();
         let stats_tracker = self.stats_tracker.clone();
 
+        // 创建内部的 shutdown channel 用于 listener
+        let (listener_shutdown_tx, listener_shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+
         tokio::select! {
-            result = run_forwarder_listener(config, stream_tx, router, stats_tracker) => {
+            result = run_forwarder_listener(config, stream_tx, router, stats_tracker, listener_shutdown_rx) => {
                 if let Err(e) = &result {
                     let mut s = status.write().await;
                     *s = crate::client::HandlerStatus::Failed(e.to_string());
@@ -1225,6 +1238,8 @@ impl ProxyHandler for ForwarderHandler {
             _ = &mut shutdown_rx => {
                 let mut s = status.write().await;
                 *s = crate::client::HandlerStatus::Stopped;
+                // 通知 listener 关闭
+                let _ = listener_shutdown_tx.send(());
                 Ok(())
             }
         }

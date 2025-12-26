@@ -345,6 +345,9 @@ async fn run_client_session(
     let (visitor_stream_tx, mut visitor_stream_rx) =
         tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>(100);
 
+    // 创建广播channel用于通知所有监听器连接已断开
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+
     // 启动 visitor 监听器
     if !config.visitors.is_empty() {
         info!("Starting {} visitor listeners...", config.visitors.len());
@@ -353,9 +356,10 @@ async fn run_client_session(
             let visitor_clone = visitor.clone();
             let visitor_name = visitor.name.clone();
             let stream_tx_clone = visitor_stream_tx.clone();
+            let shutdown_rx = shutdown_tx.subscribe();
 
             tokio::spawn(async move {
-                if let Err(e) = run_visitor_listener(visitor_clone, stream_tx_clone).await {
+                if let Err(e) = run_visitor_listener(visitor_clone, stream_tx_clone, shutdown_rx).await {
                     error!("Visitor '{}' listener error: {}", visitor_name, e);
                 }
             });
@@ -387,6 +391,7 @@ async fn run_client_session(
             let forwarder_clone = forwarder.clone();
             let forwarder_name = forwarder.name.clone();
             let stream_tx_clone = visitor_stream_tx.clone(); // 复用同一个 channel
+            let shutdown_rx = shutdown_tx.subscribe();
             let stats_tracker = stats_manager.get_tracker(&forwarder.name);
 
             // 如果配置了路由策略，创建 GeoIP 路由器
@@ -419,6 +424,7 @@ async fn run_client_session(
                     stream_tx_clone,
                     router,
                     stats_tracker,
+                    shutdown_rx,
                 )
                 .await
                 {
@@ -449,10 +455,14 @@ async fn run_client_session(
                     }
                     Some(Err(e)) => {
                         error!("Yamux error: {}", e);
+                        // 通知所有监听器连接已断开
+                        let _ = shutdown_tx.send(());
                         break;
                     }
                     None => {
                         info!("Yamux connection closed by server");
+                        // 通知所有监听器连接已断开
+                        let _ = shutdown_tx.send(());
                         break;
                     }
                 }

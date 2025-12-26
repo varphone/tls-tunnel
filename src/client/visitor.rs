@@ -16,6 +16,7 @@ use super::ProxyHandler;
 pub async fn run_visitor_listener(
     visitor: VisitorConfig,
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<()> {
     let bind_addr = format!("{}:{}", visitor.bind_addr, visitor.bind_port);
 
@@ -31,31 +32,40 @@ pub async fn run_visitor_listener(
     info!("Visitor '{}': Listening on {}", visitor.name, bind_addr);
 
     loop {
-        match listener.accept().await {
-            Ok((local_stream, peer_addr)) => {
-                info!(
-                    "Visitor '{}': Accepted connection from {}",
-                    visitor.name, peer_addr
-                );
-
-                let visitor_clone = visitor.clone();
-                let stream_tx_clone = stream_tx.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_visitor_connection(local_stream, &visitor_clone, stream_tx_clone)
-                            .await
-                    {
-                        error!(
-                            "Visitor '{}' connection handling error: {}",
-                            visitor_clone.name, e
+        tokio::select! {
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((local_stream, peer_addr)) => {
+                        info!(
+                            "Visitor '{}': Accepted connection from {}",
+                            visitor.name, peer_addr
                         );
+
+                        let visitor_clone = visitor.clone();
+                        let stream_tx_clone = stream_tx.clone();
+
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                handle_visitor_connection(local_stream, &visitor_clone, stream_tx_clone)
+                                    .await
+                            {
+                                error!(
+                                    "Visitor '{}' connection handling error: {}",
+                                    visitor_clone.name, e
+                                );
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        error!("Visitor '{}': Accept error: {}", visitor.name, e);
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                }
             }
-            Err(e) => {
-                error!("Visitor '{}': Accept error: {}", visitor.name, e);
-                sleep(Duration::from_millis(100)).await;
+            // 监听 shutdown 信号
+            _ = shutdown_rx.recv() => {
+                info!("Visitor '{}': Shutting down due to connection loss", visitor.name);
+                break Ok(());
             }
         }
     }
@@ -225,8 +235,11 @@ impl ProxyHandler for VisitorHandler {
         let stream_tx = self.stream_tx.clone();
         let status = self.status.clone();
 
+        // 创建内部的 shutdown channel 用于 listener
+        let (listener_shutdown_tx, listener_shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+
         tokio::select! {
-            result = run_visitor_listener(config, stream_tx) => {
+            result = run_visitor_listener(config, stream_tx, listener_shutdown_rx) => {
                 if let Err(e) = &result {
                     let mut s = status.write().await;
                     *s = crate::client::HandlerStatus::Failed(e.to_string());
@@ -236,6 +249,8 @@ impl ProxyHandler for VisitorHandler {
             _ = &mut shutdown_rx => {
                 let mut s = status.write().await;
                 *s = crate::client::HandlerStatus::Stopped;
+                // 通知 listener 关闭
+                let _ = listener_shutdown_tx.send(());
                 Ok(())
             }
         }
