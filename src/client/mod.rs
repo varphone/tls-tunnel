@@ -281,6 +281,7 @@ async fn run_client_session(
     for proxy in &config.proxies {
         let tracker = stats::ClientStatsTracker::new(
             proxy.name.clone(),
+            proxy.proxy_type,
             "127.0.0.1".to_string(), // 本地监听地址
             proxy.local_port,
             client_config.server_addr.clone(),
@@ -368,11 +369,25 @@ async fn run_client_session(
             config.forwarders.len()
         );
 
+        // 为每个 forwarder 创建统计跟踪器
+        for forwarder in &config.forwarders {
+            let tracker = stats::ClientStatsTracker::new(
+                forwarder.name.clone(),
+                forwarder.proxy_type,
+                forwarder.bind_addr.clone(),
+                forwarder.bind_port,
+                client_config.server_addr.clone(),
+                0, // forwarder 没有固定的 target_port
+            );
+            stats_manager.add_tracker(tracker);
+        }
+
         // 为每个 forwarder 创建对应的 GeoIP 路由器
         for forwarder in &config.forwarders {
             let forwarder_clone = forwarder.clone();
             let forwarder_name = forwarder.name.clone();
             let stream_tx_clone = visitor_stream_tx.clone(); // 复用同一个 channel
+            let stats_tracker = stats_manager.get_tracker(&forwarder.name);
 
             // 如果配置了路由策略，创建 GeoIP 路由器
             let router = if let Some(ref routing_config) = forwarder.routing {
@@ -400,7 +415,7 @@ async fn run_client_session(
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    forwarder::run_forwarder_listener(forwarder_clone, stream_tx_clone, router)
+                    forwarder::run_forwarder_listener(forwarder_clone, stream_tx_clone, router, stats_tracker)
                         .await
                 {
                     error!("Forwarder '{}' listener error: {}", forwarder_name, e);

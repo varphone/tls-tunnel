@@ -11,11 +11,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+use crate::config::ProxyType;
+
 /// 客户端代理统计信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientProxyStats {
     /// 代理名称
     pub name: String,
+    /// 代理类型
+    pub proxy_type: String,
     /// 本地监听地址
     pub bind_addr: String,
     /// 本地监听端口
@@ -42,6 +46,7 @@ pub struct ClientProxyStats {
 #[derive(Clone)]
 pub struct ClientStatsTracker {
     name: String,
+    proxy_type: ProxyType,
     bind_addr: String,
     bind_port: u16,
     target_addr: String,
@@ -58,6 +63,7 @@ impl ClientStatsTracker {
     /// 创建新的统计跟踪器
     pub fn new(
         name: String,
+        proxy_type: ProxyType,
         bind_addr: String,
         bind_port: u16,
         target_addr: String,
@@ -65,6 +71,7 @@ impl ClientStatsTracker {
     ) -> Self {
         Self {
             name,
+            proxy_type,
             bind_addr,
             bind_port,
             target_addr,
@@ -117,6 +124,7 @@ impl ClientStatsTracker {
     pub fn snapshot(&self) -> ClientProxyStats {
         ClientProxyStats {
             name: self.name.clone(),
+            proxy_type: format!("{:?}", self.proxy_type),
             bind_addr: self.bind_addr.clone(),
             bind_port: self.bind_port,
             target_addr: self.target_addr.clone(),
@@ -296,6 +304,7 @@ fn generate_client_stats_html(manager: &ClientStatsManager) -> String {
             r#"
             <tr>
                 <td>{}</td>
+                <td>{}</td>
                 <td>{}:{}</td>
                 <td>{}:{}</td>
                 <td>{}</td>
@@ -307,6 +316,7 @@ fn generate_client_stats_html(manager: &ClientStatsManager) -> String {
             </tr>
             "#,
             stat.name,
+            stat.proxy_type,
             stat.bind_addr,
             stat.bind_port,
             stat.target_addr,
@@ -455,6 +465,7 @@ fn generate_client_stats_html(manager: &ClientStatsManager) -> String {
                 <thead>
                     <tr>
                         <th>代理名称</th>
+                        <th>代理类型</th>
                         <th>本地地址</th>
                         <th>目标地址</th>
                         <th>活跃连接</th>
@@ -527,6 +538,7 @@ mod tests {
     fn test_stats_tracker_creation() {
         let tracker = ClientStatsTracker::new(
             "test-proxy".to_string(),
+            ProxyType::Tcp,
             "127.0.0.1".to_string(),
             8080,
             "server.example.com".to_string(),
@@ -545,6 +557,7 @@ mod tests {
     fn test_connection_tracking() {
         let tracker = ClientStatsTracker::new(
             "test".to_string(),
+            ProxyType::Tcp,
             "127.0.0.1".to_string(),
             8080,
             "server".to_string(),
@@ -571,6 +584,7 @@ mod tests {
     fn test_bytes_tracking() {
         let tracker = ClientStatsTracker::new(
             "test".to_string(),
+            ProxyType::Tcp,
             "127.0.0.1".to_string(),
             8080,
             "server".to_string(),
@@ -609,6 +623,7 @@ mod tests {
 
         let tracker1 = ClientStatsTracker::new(
             "proxy1".to_string(),
+            ProxyType::Tcp,
             "127.0.0.1".to_string(),
             8080,
             "server".to_string(),
@@ -617,6 +632,7 @@ mod tests {
 
         let tracker2 = ClientStatsTracker::new(
             "proxy2".to_string(),
+            ProxyType::Tcp,
             "127.0.0.1".to_string(),
             8081,
             "server".to_string(),

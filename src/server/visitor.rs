@@ -111,8 +111,10 @@ pub async fn handle_visitor_stream(
             .context("Failed to read proxy name length")?;
         let name_len = u16::from_be_bytes(name_len_buf) as usize;
 
-        if name_len == 0 || name_len > 64 {
-            let error_msg = "Invalid proxy name length (must be 1-64 bytes)";
+        // 对于 forward 请求，允许更长的名称（包含完整域名+端口）
+        // 正常代理名称限制在64字节，forward 请求限制在255字节
+        if name_len == 0 || name_len > 255 {
+            let error_msg = "Invalid proxy name length (must be 1-255 bytes)";
             error!("{}", error_msg);
             visitor_stream.write_all(&[0]).await.ok();
             send_error_message(&mut visitor_stream, error_msg)

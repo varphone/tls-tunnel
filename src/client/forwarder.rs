@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use super::config::read_error_message;
 use super::geoip::GeoIpRouter;
+use super::stats::ClientStatsTracker;
 use super::ProxyHandler;
 
 /// 每个 forwarder 的最大并发连接数（防止 DoS 攻击）
@@ -19,12 +20,49 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 1000;
 /// 协议解析超时时间（防止慢速攻击）
 const PROTOCOL_PARSE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 数据复制缓冲区大小
+const COPY_BUFFER_SIZE: usize = 8192;
+
+/// 实时统计的数据复制函数
+/// 相比 tokio::io::copy，这个函数会在每次复制数据后立即更新统计信息
+async fn copy_with_stats<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    stats_tracker: Option<&ClientStatsTracker>,
+    record_fn: impl Fn(&ClientStatsTracker, u64),
+) -> std::io::Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; COPY_BUFFER_SIZE];
+    let mut total_copied = 0u64;
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+
+        writer.write_all(&buf[..n]).await?;
+        total_copied += n as u64;
+
+        // 实时更新统计信息
+        if let Some(tracker) = stats_tracker {
+            record_fn(tracker, n as u64);
+        }
+    }
+
+    Ok(total_copied)
+}
+
 /// 运行 forwarder 监听器
 /// 在客户端本地监听端口，接受连接后解析目标地址并通过 yamux 转发到服务器
 pub async fn run_forwarder_listener(
     forwarder: ForwarderConfig,
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     router: Option<Arc<GeoIpRouter>>,
+    stats_tracker: Option<ClientStatsTracker>,
 ) -> Result<()> {
     let bind_addr = format!("{}:{}", forwarder.bind_addr, forwarder.bind_port);
 
@@ -73,6 +111,7 @@ pub async fn run_forwarder_listener(
                 let forwarder_clone = forwarder.clone();
                 let stream_tx_clone = stream_tx.clone();
                 let router_clone = router.clone();
+                let stats_tracker_clone = stats_tracker.clone();
 
                 tokio::spawn(async move {
                     // 持有 permit 直到任务结束，自动释放
@@ -82,6 +121,7 @@ pub async fn run_forwarder_listener(
                         &forwarder_clone,
                         stream_tx_clone,
                         router_clone,
+                        stats_tracker_clone,
                     )
                     .await
                     {
@@ -107,12 +147,18 @@ async fn handle_forwarder_connection(
     forwarder: &ForwarderConfig,
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     router: Option<Arc<GeoIpRouter>>,
+    stats_tracker: Option<ClientStatsTracker>,
 ) -> Result<()> {
     // 获取客户端地址用于审计日志
     let peer_addr = local_stream
         .peer_addr()
         .map(|addr| addr.to_string())
         .unwrap_or_else(|_| "unknown".to_string());
+
+    // 记录连接开始
+    if let Some(ref tracker) = stats_tracker {
+        tracker.connection_started();
+    }
 
     // 1. 根据 proxy_type 解析目标地址
     let target = match forwarder.proxy_type {
@@ -136,7 +182,12 @@ async fn handle_forwarder_connection(
             "Forwarder '{}': Connection from {} to {} -> DIRECT (bypassing proxy)",
             forwarder.name, peer_addr, target
         );
-        return handle_direct_connection(local_stream, &target, &forwarder.name).await;
+        let result = handle_direct_connection(local_stream, &target, &forwarder.name, stats_tracker.clone()).await;
+        // 无论成功或失败，都记录连接结束
+        if let Some(ref tracker) = stats_tracker {
+            tracker.connection_ended();
+        }
+        return result;
     } else {
         info!(
             "Forwarder '{}': Connection from {} to {} -> PROXY (via server)",
@@ -226,32 +277,49 @@ async fn handle_forwarder_connection(
     let (mut local_read, mut local_write) = local_stream.split();
     let (mut server_read, mut server_write) = tokio::io::split(server_stream_tokio);
 
-    let client_to_server = async {
-        tokio::io::copy(&mut local_read, &mut server_write).await?;
+    let stats_tracker_c2s = stats_tracker.clone();
+    let client_to_server = async move {
+        let bytes = copy_with_stats(
+            &mut local_read,
+            &mut server_write,
+            stats_tracker_c2s.as_ref(),
+            |tracker, n| tracker.record_bytes_sent(n),
+        )
+        .await?;
         server_write.shutdown().await?;
-        Ok::<_, std::io::Error>(())
+        Ok::<_, std::io::Error>(bytes)
     };
 
-    let server_to_client = async {
-        tokio::io::copy(&mut server_read, &mut local_write).await?;
+    let stats_tracker_s2c = stats_tracker.clone();
+    let server_to_client = async move {
+        let bytes = copy_with_stats(
+            &mut server_read,
+            &mut local_write,
+            stats_tracker_s2c.as_ref(),
+            |tracker, n| tracker.record_bytes_received(n),
+        )
+        .await?;
         local_write.shutdown().await?;
-        Ok::<_, std::io::Error>(())
+        Ok::<_, std::io::Error>(bytes)
     };
 
-    tokio::select! {
-        result = client_to_server => {
-            if let Err(e) = result {
-                warn!("Forwarder '{}': Client to server copy error: {}", forwarder.name, e);
-            }
-        }
-        result = server_to_client => {
-            if let Err(e) = result {
-                warn!("Forwarder '{}': Server to client copy error: {}", forwarder.name, e);
-            }
-        }
+    // 使用 tokio::join! 确保两个方向的流量都被记录
+    let (result_c2s, result_s2c) = tokio::join!(client_to_server, server_to_client);
+    
+    if let Err(e) = result_c2s {
+        warn!("Forwarder '{}': Client to server copy error: {}", forwarder.name, e);
+    }
+    if let Err(e) = result_s2c {
+        warn!("Forwarder '{}': Server to client copy error: {}", forwarder.name, e);
     }
 
     info!("Forwarder '{}': Connection closed", forwarder.name);
+    
+    // 记录连接结束
+    if let Some(ref tracker) = stats_tracker {
+        tracker.connection_ended();
+    }
+    
     Ok(())
 }
 
@@ -522,6 +590,7 @@ async fn handle_direct_connection(
     mut local_stream: TcpStream,
     target: &str,
     forwarder_name: &str,
+    stats_tracker: Option<ClientStatsTracker>,
 ) -> Result<()> {
     // 安全检查：禁止访问本地地址和内网地址（防止 SSRF 攻击）
     if is_unsafe_direct_target(target) {
@@ -560,29 +629,40 @@ async fn handle_direct_connection(
     let (mut local_read, mut local_write) = local_stream.split();
     let (mut remote_read, mut remote_write) = remote_stream.split();
 
-    let client_to_remote = async {
-        tokio::io::copy(&mut local_read, &mut remote_write).await?;
+    let stats_tracker_c2r = stats_tracker.clone();
+    let client_to_remote = async move {
+        let bytes = copy_with_stats(
+            &mut local_read,
+            &mut remote_write,
+            stats_tracker_c2r.as_ref(),
+            |tracker, n| tracker.record_bytes_sent(n),
+        )
+        .await?;
         remote_write.shutdown().await?;
-        Ok::<_, std::io::Error>(())
+        Ok::<_, std::io::Error>(bytes)
     };
 
-    let remote_to_client = async {
-        tokio::io::copy(&mut remote_read, &mut local_write).await?;
+    let stats_tracker_r2c = stats_tracker.clone();
+    let remote_to_client = async move {
+        let bytes = copy_with_stats(
+            &mut remote_read,
+            &mut local_write,
+            stats_tracker_r2c.as_ref(),
+            |tracker, n| tracker.record_bytes_received(n),
+        )
+        .await?;
         local_write.shutdown().await?;
-        Ok::<_, std::io::Error>(())
+        Ok::<_, std::io::Error>(bytes)
     };
 
-    tokio::select! {
-        result = client_to_remote => {
-            if let Err(e) = result {
-                warn!("Forwarder '{}' direct: Client to remote error: {}", forwarder_name, e);
-            }
-        }
-        result = remote_to_client => {
-            if let Err(e) = result {
-                warn!("Forwarder '{}' direct: Remote to client error: {}", forwarder_name, e);
-            }
-        }
+    // 使用 tokio::join! 确保两个方向的流量都被记录
+    let (result_c2r, result_r2c) = tokio::join!(client_to_remote, remote_to_client);
+    
+    if let Err(e) = result_c2r {
+        warn!("Forwarder '{}' direct: Client to remote error: {}", forwarder_name, e);
+    }
+    if let Err(e) = result_r2c {
+        warn!("Forwarder '{}' direct: Remote to client error: {}", forwarder_name, e);
     }
 
     info!(
@@ -597,6 +677,7 @@ pub struct ForwarderHandler {
     config: ForwarderConfig,
     stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     router: Option<Arc<GeoIpRouter>>,
+    stats_tracker: Option<ClientStatsTracker>,
     status: Arc<tokio::sync::RwLock<crate::client::HandlerStatus>>,
     shutdown_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
@@ -606,11 +687,13 @@ impl ForwarderHandler {
         config: ForwarderConfig,
         stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
         router: Option<Arc<GeoIpRouter>>,
+        stats_tracker: Option<ClientStatsTracker>,
     ) -> Self {
         Self {
             config,
             stream_tx,
             router,
+            stats_tracker,
             status: Arc::new(tokio::sync::RwLock::new(
                 crate::client::HandlerStatus::Stopped,
             )),
@@ -642,9 +725,10 @@ impl ProxyHandler for ForwarderHandler {
         let stream_tx = self.stream_tx.clone();
         let router = self.router.clone();
         let status = self.status.clone();
+        let stats_tracker = self.stats_tracker.clone();
 
         tokio::select! {
-            result = run_forwarder_listener(config, stream_tx, router) => {
+            result = run_forwarder_listener(config, stream_tx, router, stats_tracker) => {
                 if let Err(e) = &result {
                     let mut s = status.write().await;
                     *s = crate::client::HandlerStatus::Failed(e.to_string());
