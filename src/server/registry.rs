@@ -4,8 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
-pub const SUPPORTED_PROTOCOL_VERSION: u8 = 1;
-
 /// 代理配置信息（从客户端接收）
 #[derive(Debug, Clone)]
 pub struct ProxyInfo {
@@ -24,14 +22,6 @@ pub struct VisitorInfo {
     pub bind_addr: String,
     pub bind_port: u16,
     pub publish_port: u16,
-}
-
-/// 客户端配置信息
-#[derive(Debug, Clone)]
-pub struct ClientConfigs {
-    pub proxies: Vec<ProxyInfo>,
-    #[allow(dead_code)]
-    pub visitors: Vec<VisitorInfo>,
 }
 
 /// 全局代理注册表项

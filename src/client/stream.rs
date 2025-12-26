@@ -2,47 +2,12 @@ use crate::config::ClientFullConfig;
 use crate::connection_pool::ConnectionPool;
 use anyhow::Result;
 use futures::io::{AsyncReadExt as FuturesAsyncReadExt, AsyncWriteExt as FuturesAsyncWriteExt};
-use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{error, info, warn};
 
 use super::stats::ClientStatsTracker;
-
-use super::config::PROTOCOL_VERSION;
-
-#[derive(Serialize)]
-pub struct ClientConfigMessage<'a> {
-    version: u8,
-    proxies: &'a [crate::config::ProxyConfig],
-    visitors: &'a [crate::config::VisitorConfig],
-}
-
-pub async fn send_client_config<S>(config: &ClientFullConfig, tls_stream: &mut S) -> Result<()>
-where
-    S: AsyncWriteExt + Unpin,
-{
-    let msg = ClientConfigMessage {
-        version: PROTOCOL_VERSION,
-        proxies: &config.proxies,
-        visitors: &config.visitors,
-    };
-
-    let json = serde_json::to_vec(&msg)?;
-    let len = json.len() as u32;
-    tls_stream.write_all(&len.to_be_bytes()).await?;
-    tls_stream.write_all(&json).await?;
-    tls_stream.flush().await?;
-
-    info!(
-        "Sent proxy configurations (json) count={} bytes={}",
-        config.proxies.len(),
-        json.len()
-    );
-    Ok(())
-}
 
 /// 拷贝数据并记录统计
 async fn copy_with_stats<R, W>(

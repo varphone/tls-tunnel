@@ -644,14 +644,3 @@ async fn run_client_event_loop(
     info!("Client event loop ended");
     Ok(())
 }
-
-/// 旧版本的主循环（待删除）
-#[allow(dead_code)]
-async fn run_old_main_loop(
-    config: Arc<ClientFullConfig>,
-    _proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>>,
-) -> Result<()> {
-    // 已重构到 run_client_event_loop
-    warn!("run_old_main_loop is deprecated");
-    Ok(())
-}

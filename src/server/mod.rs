@@ -252,7 +252,7 @@ async fn handle_client_transport(
     // 建立 yamux 连接
     let yamux_config = YamuxConfig::default();
     let tls_compat = tls_stream.compat();
-    let mut yamux_conn = YamuxConnection::new(tls_compat, yamux_config, YamuxMode::Server);
+    let yamux_conn = YamuxConnection::new(tls_compat, yamux_config, YamuxMode::Server);
 
     info!("Yamux connection established");
 

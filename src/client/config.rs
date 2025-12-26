@@ -10,8 +10,6 @@ pub const RECONNECT_DELAY_SECS: u64 = 5;
 pub const LOCAL_CONNECT_RETRIES: u32 = 3;
 /// 本地服务连接重试延迟（毫秒）- 可通过环境变量 TLS_TUNNEL_LOCAL_RETRY_DELAY_MS 覆盖
 pub const LOCAL_RETRY_DELAY_MS: u64 = 1000;
-/// 协议版本（JSON 帧）
-pub const PROTOCOL_VERSION: u8 = 1;
 
 pub fn get_reconnect_delay() -> u64 {
     std::env::var(format!("{}RECONNECT_DELAY_SECS", ENV_PREFIX))
