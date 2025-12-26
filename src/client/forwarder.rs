@@ -137,6 +137,7 @@ impl FailedTargetManager {
     }
 
     /// 获取失败目标数量（用于统计）
+    #[allow(dead_code)]
     pub async fn failed_targets_count(&self) -> usize {
         let targets = self.targets.read().await;
         let now = SystemTime::now()
@@ -330,14 +331,103 @@ async fn handle_forwarder_connection(
     }
 
     // 1. 根据 proxy_type 解析目标地址
-    let target = match forwarder.proxy_type {
-        ProxyType::HttpProxy => parse_http_connect(&mut local_stream).await?,
-        ProxyType::Socks5Proxy => parse_socks5(&mut local_stream).await?,
+    let (target, http_direct_request) = match forwarder.proxy_type {
+        ProxyType::HttpProxy => {
+            // 解析 HTTP 请求（支持 CONNECT 和直接转发）
+            let req = parse_http_request(&mut local_stream).await?;
+            
+            match req.method.as_str() {
+                "CONNECT" => {
+                    // CONNECT 隧道模式
+                    handle_http_connect(&mut local_stream, &req.target).await?;
+                    (req.target.clone(), None)
+                }
+                _ => {
+                    // HTTP 直接转发（GET, POST 等）
+                    let (modified_request, target) = handle_http_direct(&mut local_stream, &req).await?;
+                    (target, Some(modified_request))
+                }
+            }
+        }
+        ProxyType::Socks5Proxy => {
+            let target = parse_socks5(&mut local_stream).await?;
+            // SOCKS5 始终是隧道模式
+            (target, None)
+        }
         _ => anyhow::bail!(
             "Invalid proxy type for forwarder: {:?}",
             forwarder.proxy_type
         ),
     };
+
+    // 如果是 HTTP 直接转发（而非 CONNECT），需要直接转发修改后的请求
+    if let Some(request_data) = http_direct_request {
+        // 检查目标是否在黑名单中
+        if failed_target_manager.is_blacklisted(&target).await {
+            warn!(
+                "Forwarder '{}': Target '{}' is blacklisted due to previous failures, rejecting immediately",
+                forwarder.name, target
+            );
+            let error_response = b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nService temporarily unavailable";
+            local_stream.write_all(error_response).await.ok();
+            
+            if let Some(ref tracker) = stats_tracker {
+                tracker.connection_ended();
+            }
+            return Err(anyhow::anyhow!("Target blacklisted"));
+        }
+
+        // 直接连接目标并转发请求
+        let mut remote_stream = match TcpStream::connect(&target).await {
+            Ok(stream) => {
+                stream.set_nodelay(true)?;
+                stream
+            }
+            Err(e) => {
+                failed_target_manager.record_failure(&target).await;
+                local_stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nConnection failed").await.ok();
+                
+                if let Some(ref tracker) = stats_tracker {
+                    tracker.connection_ended();
+                }
+                return Err(anyhow::anyhow!("Connection failed: {}", e));
+            }
+        };
+
+        // 发送修改后的请求
+        remote_stream.write_all(&request_data).await?;
+        
+        // 双向数据转发
+        let (mut local_read, mut local_write) = local_stream.split();
+        let (mut remote_read, mut remote_write) = remote_stream.split();
+
+        let stats_c2r = stats_tracker.clone();
+        let c2r = async {
+            copy_with_stats(
+                &mut local_read,
+                &mut remote_write,
+                stats_c2r.as_ref(),
+                |t, n| t.record_bytes_sent(n),
+            ).await
+        };
+
+        let stats_r2c = stats_tracker.clone();
+        let r2c = async {
+            copy_with_stats(
+                &mut remote_read,
+                &mut local_write,
+                stats_r2c.as_ref(),
+                |t, n| t.record_bytes_received(n),
+            ).await
+        };
+
+        let _ = tokio::join!(c2r, r2c);
+
+        if let Some(ref tracker) = stats_tracker {
+            tracker.connection_ended();
+        }
+        return Ok(());
+    }
 
     // 检查目标是否在黑名单中（快速失败）
     if failed_target_manager.is_blacklisted(&target).await {
@@ -533,17 +623,25 @@ async fn handle_forwarder_connection(
     Ok(())
 }
 
-/// 解析 HTTP CONNECT 请求
-/// 格式：CONNECT example.com:443 HTTP/1.1
-async fn parse_http_connect(stream: &mut TcpStream) -> Result<String> {
+/// HTTP 请求方法和元数据
+#[derive(Debug)]
+struct HttpRequest {
+    method: String,
+    target: String,
+    headers: std::collections::HashMap<String, String>,
+    #[allow(dead_code)]
+    raw_request: Vec<u8>,
+}
+
+/// 解析 HTTP 请求（支持 CONNECT 和直接转发）
+async fn parse_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     use tokio::time::timeout;
 
-    // 使用超时包装整个解析过程
     let result = timeout(PROTOCOL_PARSE_TIMEOUT, async {
         let mut buffer = vec![0u8; HTTP_PARSE_BUFFER_SIZE];
         let mut pos = 0;
 
-        // 读取到第一个 \r\n\r\n（使用缓冲读取而非逐字节）
+        // 读取到第一个 \r\n\r\n
         loop {
             let n = stream.read(&mut buffer[pos..]).await?;
             if n == 0 {
@@ -555,30 +653,43 @@ async fn parse_http_connect(stream: &mut TcpStream) -> Result<String> {
             if pos >= 4 {
                 for i in 0..=pos - 4 {
                     if &buffer[i..i + 4] == b"\r\n\r\n" {
-                        // 找到请求结束
-                        let request = String::from_utf8_lossy(&buffer[..i + 4]);
-                        let first_line = request
-                            .lines()
-                            .next()
-                            .ok_or_else(|| anyhow::anyhow!("Empty HTTP request"))?;
+                        let request_buf = buffer[..i + 4].to_vec();
+                        let request = String::from_utf8_lossy(&request_buf);
+                        let lines: Vec<&str> = request.lines().collect();
 
-                        // 解析：CONNECT example.com:443 HTTP/1.1
+                        if lines.is_empty() {
+                            anyhow::bail!("Empty HTTP request");
+                        }
+
+                        let first_line = lines[0];
                         let parts: Vec<&str> = first_line.split_whitespace().collect();
                         if parts.len() < 2 {
-                            anyhow::bail!("Invalid HTTP CONNECT request");
+                            anyhow::bail!("Invalid HTTP request line");
                         }
 
-                        if parts[0] != "CONNECT" {
-                            anyhow::bail!("Only CONNECT method is supported");
-                        }
-
+                        let method = parts[0].to_string();
                         let target = parts[1].to_string();
-                        return Ok::<String, anyhow::Error>(target);
+
+                        // 解析 headers
+                        let mut headers = std::collections::HashMap::new();
+                        for line in &lines[1..] {
+                            if let Some(colon_pos) = line.find(':') {
+                                let key = line[..colon_pos].trim().to_lowercase();
+                                let value = line[colon_pos + 1..].trim().to_string();
+                                headers.insert(key, value);
+                            }
+                        }
+
+                        return Ok::<HttpRequest, anyhow::Error>(HttpRequest {
+                            method,
+                            target,
+                            headers,
+                            raw_request: request_buf,
+                        });
                     }
                 }
             }
 
-            // 防止超长请求
             if pos >= HTTP_PARSE_BUFFER_SIZE {
                 anyhow::bail!("HTTP request too long");
             }
@@ -587,24 +698,78 @@ async fn parse_http_connect(stream: &mut TcpStream) -> Result<String> {
     .await
     .map_err(|_| {
         anyhow::anyhow!(
-            "HTTP CONNECT parsing timeout after {:?}",
+            "HTTP parsing timeout after {:?}",
             PROTOCOL_PARSE_TIMEOUT
         )
     })??;
 
-    let target = result;
+    Ok(result)
+}
 
-    // 验证目标地址格式
+/// 处理 HTTP CONNECT 请求（隧道模式）
+async fn handle_http_connect(stream: &mut TcpStream, target: &str) -> Result<()> {
     if !target.contains(':') {
         anyhow::bail!("Invalid target address: {}", target);
     }
 
-    // 发送 200 Connection Established 响应
     let response = b"HTTP/1.1 200 Connection Established\r\n\r\n";
     stream.write_all(response).await?;
     stream.flush().await?;
 
-    Ok(target)
+    Ok(())
+}
+
+/// 处理 HTTP 直接转发（如 GET, POST 等）
+async fn handle_http_direct(
+    _stream: &mut TcpStream,
+    req: &HttpRequest,
+) -> Result<(Vec<u8>, String)> {
+    // 解析目标
+    let target = if req.target.starts_with("http://") || req.target.starts_with("https://") {
+        // 绝对 URL
+        let url = url::Url::parse(&req.target)
+            .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+        let host = url.host_str().ok_or_else(|| anyhow::anyhow!("No host in URL"))?;
+        let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+        format!("{}:{}", host, port)
+    } else if let Some(host_header) = req.headers.get("host") {
+        // 使用 Host header
+        host_header.clone()
+    } else {
+        anyhow::bail!("Cannot determine target from HTTP request");
+    };
+
+    // 重建请求（修改为相对路径）
+    let path = if req.target.starts_with("http") {
+        url::Url::parse(&req.target)
+            .ok()
+            .and_then(|u| {
+                let mut path = u.path().to_string();
+                if let Some(query) = u.query() {
+                    path.push('?');
+                    path.push_str(query);
+                }
+                Some(path)
+            })
+            .unwrap_or_else(|| "/".to_string())
+    } else {
+        req.target.clone()
+    };
+
+    let mut modified_request = format!("{} {} HTTP/1.1\r\n", req.method, path).into_bytes();
+
+    // 重建 headers（去除 Proxy-Connection 等代理相关 header）
+    for (key, value) in &req.headers {
+        if !matches!(
+            key.as_str(),
+            "proxy-connection" | "connection" | "keep-alive"
+        ) {
+            modified_request.extend(format!("{}: {}\r\n", key, value).into_bytes());
+        }
+    }
+    modified_request.extend(b"Connection: close\r\n\r\n");
+
+    Ok((modified_request, target))
 }
 
 /// 解析 SOCKS5 请求
@@ -1010,5 +1175,235 @@ impl ProxyHandler for ForwarderHandler {
 
     fn bind_address(&self) -> String {
         format!("{}:{}", self.config.bind_addr, self.config.bind_port)
+    }
+}
+/// ============= 优化 5: 连接池缓存 =============
+
+/// 连接池项
+#[allow(dead_code)]
+struct PooledConnection {
+    stream: TcpStream,
+    created_at: std::time::Instant,
+}
+
+/// 连接池缓存
+#[allow(dead_code)]
+pub struct ConnectionPool {
+    pools: Arc<RwLock<HashMap<String, Vec<PooledConnection>>>>,
+    max_pool_size: usize,
+    max_idle_time: Duration,
+}
+
+impl ConnectionPool {
+    pub fn new(max_pool_size: usize, max_idle_time: Duration) -> Self {
+        Self {
+            pools: Arc::new(RwLock::new(HashMap::new())),
+            max_pool_size,
+            max_idle_time,
+        }
+    }
+
+    /// 从池中获取或创建连接
+    pub async fn get_or_create(
+        &self,
+        target: &str,
+    ) -> Result<TcpStream> {
+        // 尝试从池中获取可用连接
+        {
+            let mut pools = self.pools.write().await;
+            if let Some(pool) = pools.get_mut(target) {
+                while !pool.is_empty() {
+                    let pooled = pool.pop().unwrap();
+                    // 检查连接是否过期
+                    if pooled.created_at.elapsed() < self.max_idle_time {
+                        return Ok(pooled.stream);
+                    }
+                    // 连接已过期，丢弃
+                }
+            }
+        }
+
+        // 创建新连接
+        let stream = TcpStream::connect(target).await
+            .context(format!("Failed to connect to {}", target))?;
+        
+        stream.set_nodelay(true)?;
+        Ok(stream)
+    }
+
+    /// 将连接返还到池
+    pub async fn return_connection(&self, target: String, stream: TcpStream) {
+        let mut pools = self.pools.write().await;
+        let pool = pools.entry(target).or_insert_with(Vec::new);
+        
+        if pool.len() < self.max_pool_size {
+            pool.push(PooledConnection {
+                stream,
+                created_at: std::time::Instant::now(),
+            });
+        }
+        // 如果池已满，连接被丢弃
+    }
+
+    /// 清理过期连接
+    pub async fn cleanup_expired(&self) {
+        let mut pools = self.pools.write().await;
+        for pool in pools.values_mut() {
+            pool.retain(|p| p.created_at.elapsed() < self.max_idle_time);
+        }
+    }
+}
+
+/// ============= 优化 6: SOCKS5 认证支持 =============
+
+/// SOCKS5 认证配置
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct Socks5Auth {
+    pub username: String,
+    pub password: String,
+}
+
+/// SOCKS5 认证处理
+#[allow(dead_code)]
+async fn handle_socks5_auth(
+    stream: &mut TcpStream,
+    auth: Option<&Socks5Auth>,
+) -> Result<()> {
+    // 1. 服务器读取客户端支持的认证方法
+    let mut buffer = [0u8; 2];
+    stream.read_exact(&mut buffer).await?;
+
+    let nmethods = buffer[1] as usize;
+    let mut methods = vec![0u8; nmethods];
+    stream.read_exact(&mut methods).await?;
+
+    // 2. 选择认证方法
+    let selected_method = if auth.is_some() && methods.contains(&0x02) {
+        // 使用用户名/密码认证
+        0x02u8
+    } else if methods.contains(&0x00) {
+        // 不需要认证
+        0x00u8
+    } else {
+        // 不支持的认证方法
+        stream.write_all(&[0x05, 0xFF]).await?;
+        anyhow::bail!("No supported authentication method");
+    };
+
+    // 3. 发送选定的认证方法
+    stream.write_all(&[0x05, selected_method]).await?;
+    stream.flush().await?;
+
+    // 4. 如果需要认证，进行用户名/密码验证
+    if selected_method == 0x02 {
+        if let Some(auth_config) = auth {
+            // 读取认证请求
+            let mut auth_buf = [0u8; 2];
+            stream.read_exact(&mut auth_buf).await?;
+
+            let username_len = auth_buf[1] as usize;
+            let mut username = vec![0u8; username_len];
+            stream.read_exact(&mut username).await?;
+
+            let mut password_len = [0u8; 1];
+            stream.read_exact(&mut password_len).await?;
+            let password_len = password_len[0] as usize;
+            let mut password = vec![0u8; password_len];
+            stream.read_exact(&mut password).await?;
+
+            let username_str = String::from_utf8(username)?;
+            let password_str = String::from_utf8(password)?;
+
+            if username_str == auth_config.username && password_str == auth_config.password {
+                // 认证成功
+                stream.write_all(&[0x01, 0x00]).await?;
+            } else {
+                // 认证失败
+                stream.write_all(&[0x01, 0x01]).await?;
+                anyhow::bail!("Authentication failed");
+            }
+            stream.flush().await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// ============= 优化 7: 错误恢复机制 =============
+
+/// 重试配置
+#[allow(dead_code)]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(10),
+        }
+    }
+}
+
+/// 带指数退避的重试执行
+#[allow(dead_code)]
+pub async fn retry_with_backoff<F, Fut, T>(
+    mut f: F,
+    config: &RetryConfig,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: futures::Future<Output = Result<T>>,
+{
+    let mut attempt = 0;
+    let mut backoff = config.initial_backoff;
+
+    loop {
+        match f().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                attempt += 1;
+                if attempt >= config.max_retries {
+                    return Err(e).context(format!(
+                        "Failed after {} retries",
+                        config.max_retries
+                    ));
+                }
+
+                warn!(
+                    "Attempt {} failed: {}. Retrying in {:?}...",
+                    attempt, e, backoff
+                );
+
+                sleep(backoff).await;
+
+                // 指数退避：每次翻倍，但不超过 max_backoff
+                backoff = std::cmp::min(backoff * 2, config.max_backoff);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_connection_pool() {
+        let pool = ConnectionPool::new(5, Duration::from_secs(60));
+        // 测试池的基本功能
+        // 注意：这里需要实际的连接才能完全测试
+    }
+
+    #[test]
+    fn test_retry_config() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.initial_backoff, Duration::from_millis(100));
     }
 }
