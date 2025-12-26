@@ -8,7 +8,7 @@ mod visitor;
 
 use crate::config::{ClientFullConfig, ProxyType};
 use crate::connection_pool::ConnectionPool;
-use crate::protocol::ConfigStatusResponse;
+use crate::protocol::{AuthRequest, AuthResponse, ConfigValidationResponse, ConfigStatusResponse};
 use crate::transport::create_transport_client;
 use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
 use anyhow::{Context, Result};
@@ -22,7 +22,7 @@ use tokio_rustls::TlsConnector;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info, warn};
 
-use config::{get_reconnect_delay, read_error_message};
+use config::get_reconnect_delay;
 use connection::get_pool_config;
 use stream::{handle_stream, send_client_config};
 use visitor::run_visitor_listener;
@@ -229,56 +229,62 @@ async fn run_client_session(
 
     info!("Transport connection established");
 
-    // 发送认证密钥
-    let key_bytes = client_config.auth_key.as_bytes();
-    let key_len = (key_bytes.len() as u32).to_be_bytes();
-    tls_stream.write_all(&key_len).await?;
-    tls_stream.write_all(key_bytes).await?;
+    // 发送认证请求（JSON 格式，带长度前缀）
+    let auth_request = AuthRequest {
+        auth_key: client_config.auth_key.clone(),
+    };
+    let request_json = serde_json::to_vec(&auth_request)?;
+    tls_stream.write_all(&(request_json.len() as u32).to_be_bytes()).await?;
+    tls_stream.write_all(&request_json).await?;
     tls_stream.flush().await?;
 
-    info!("Sent authentication key");
+    info!("Sent authentication request");
 
-    // 等待认证结果
-    let mut auth_result = [0u8; 1];
-    tls_stream.read_exact(&mut auth_result).await?;
+    // 接收认证响应（JSON 格式，带长度前缀）
+    let mut len_buf = [0u8; 4];
+    tls_stream.read_exact(&mut len_buf).await?;
+    let response_len = u32::from_be_bytes(len_buf) as usize;
 
-    if auth_result[0] != 1 {
-        // 读取错误消息
-        let error_msg = match read_error_message(&mut tls_stream).await {
-            Ok(msg) => msg,
-            Err(_) => "Unknown error".to_string(),
-        };
+    let mut response_buf = vec![0u8; response_len];
+    tls_stream.read_exact(&mut response_buf).await?;
+
+    let auth_response: AuthResponse = serde_json::from_slice(&response_buf)
+        .context("Failed to parse authentication response JSON")?;
+
+    if !auth_response.success {
+        let error_msg = auth_response
+            .error
+            .unwrap_or_else(|| "Unknown authentication error".to_string());
         error!("Authentication failed: {}", error_msg);
-        return Err(anyhow::anyhow!(
-            "Server authentication failed: {}",
-            error_msg
-        ));
+        return Err(anyhow::anyhow!("Authentication failed: {}", error_msg));
     }
 
     info!("Authentication successful");
 
     send_client_config(&config, &mut tls_stream).await?;
 
-    // 检查服务器是否接受配置（读取一个确认字节）
-    let mut config_result = [0u8; 1];
-    tls_stream.read_exact(&mut config_result).await?;
+    // 接收配置验证响应（JSON 格式，带长度前缀）
+    let mut len_buf = [0u8; 4];
+    tls_stream.read_exact(&mut len_buf).await?;
+    let response_len = u32::from_be_bytes(len_buf) as usize;
 
-    if config_result[0] != 1 {
-        // 读取错误消息
-        let error_msg = match read_error_message(&mut tls_stream).await {
-            Ok(msg) => msg,
-            Err(_) => "Unknown validation error".to_string(),
-        };
+    let mut response_buf = vec![0u8; response_len];
+    tls_stream.read_exact(&mut response_buf).await?;
+
+    let validation_response: ConfigValidationResponse = serde_json::from_slice(&response_buf)
+        .context("Failed to parse configuration validation response JSON")?;
+
+    if !validation_response.valid {
+        let error_msg = validation_response
+            .error
+            .unwrap_or_else(|| "Unknown validation error".to_string());
         error!("Server rejected proxy configuration: {}", error_msg);
-        return Err(anyhow::anyhow!(
-            "Proxy configuration rejected: {}",
-            error_msg
-        ));
+        return Err(anyhow::anyhow!("Proxy configuration rejected: {}", error_msg));
     }
 
     info!("Server accepted proxy configurations");
 
-    // 读取配置状态响应（JSON 格式，带长度前缀）
+    // 接收配置状态响应（JSON 格式，带长度前缀）
     let mut len_buf = [0u8; 4];
     tls_stream.read_exact(&mut len_buf).await?;
     let response_len = u32::from_be_bytes(len_buf) as usize;

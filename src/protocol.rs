@@ -1,6 +1,69 @@
 /// 客户端与服务器之间的协议消息定义
 use serde::{Deserialize, Serialize};
 
+/// 认证请求消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthRequest {
+    /// 认证密钥
+    pub auth_key: String,
+}
+
+/// 认证响应消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    /// 认证是否成功
+    pub success: bool,
+    /// 如果失败，错误信息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl AuthResponse {
+    /// 创建成功响应
+    pub fn success() -> Self {
+        Self {
+            success: true,
+            error: None,
+        }
+    }
+
+    /// 创建失败响应
+    pub fn failed(error: String) -> Self {
+        Self {
+            success: false,
+            error: Some(error),
+        }
+    }
+}
+
+/// 配置验证响应消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigValidationResponse {
+    /// 配置是否有效
+    pub valid: bool,
+    /// 如果无效，错误信息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ConfigValidationResponse {
+    /// 创建有效响应
+    pub fn valid() -> Self {
+        Self {
+            valid: true,
+            error: None,
+        }
+    }
+
+    /// 创建无效响应
+    pub fn invalid(error: String) -> Self {
+        Self {
+            valid: false,
+            error: Some(error),
+        }
+    }
+}
+
 /// 服务器发送给客户端的配置状态响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigStatusResponse {

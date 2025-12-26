@@ -8,7 +8,7 @@ mod yamux;
 pub use registry::ProxyRegistry;
 
 use crate::config::ServerConfig;
-use crate::protocol::ConfigStatusResponse;
+use crate::protocol::{AuthRequest, AuthResponse, ConfigValidationResponse, ConfigStatusResponse};
 use crate::stats::StatsManager;
 use crate::transport::create_transport_server;
 use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
@@ -212,34 +212,45 @@ async fn handle_client_transport(
 
     info!("Transport connection established");
 
-    // 认证
-    let mut key_len_buf = [0u8; 4];
-    tls_stream.read_exact(&mut key_len_buf).await?;
-    let key_len = u32::from_be_bytes(key_len_buf) as usize;
+    // 读取认证请求（JSON 格式，带长度前缀）
+    let mut len_buf = [0u8; 4];
+    tls_stream.read_exact(&mut len_buf).await?;
+    let request_len = u32::from_be_bytes(len_buf) as usize;
 
-    if key_len > 1024 {
-        let error_msg = "Authentication key too long (max 1024 bytes)";
-        tracing::warn!("Authentication failed: key too long");
-        tls_stream.write_all(&[0]).await.ok();
-        send_error_message(&mut tls_stream, error_msg).await.ok();
-        return Err(anyhow::anyhow!("Key too long"));
+    if request_len > 10 * 1024 {
+        let error_msg = "Authentication request too large";
+        let response = AuthResponse::failed(error_msg.to_string());
+        let response_json = serde_json::to_vec(&response)?;
+        tls_stream.write_all(&(response_json.len() as u32).to_be_bytes()).await.ok();
+        tls_stream.write_all(&response_json).await.ok();
+        return Err(anyhow::anyhow!("Request too large"));
     }
 
-    let mut key_buf = vec![0u8; key_len];
-    tls_stream.read_exact(&mut key_buf).await?;
-    let client_key = String::from_utf8(key_buf)?;
+    let mut request_buf = vec![0u8; request_len];
+    tls_stream.read_exact(&mut request_buf).await?;
+    
+    let auth_request: AuthRequest = serde_json::from_slice(&request_buf)
+        .context("Failed to parse authentication request JSON")?;
 
-    if client_key != state.config.auth_key {
-        let error_msg = "Invalid authentication key";
+    // 验证认证密钥
+    let response = if auth_request.auth_key == state.config.auth_key {
+        info!("Client authenticated successfully");
+        AuthResponse::success()
+    } else {
         tracing::warn!("Authentication failed: invalid key");
-        tls_stream.write_all(&[0]).await.ok();
-        send_error_message(&mut tls_stream, error_msg).await.ok();
+        AuthResponse::failed("Invalid authentication key".to_string())
+    };
+
+    // 发送认证响应（JSON 格式，带长度前缀）
+    let response_json = serde_json::to_vec(&response)?;
+    tls_stream.write_all(&(response_json.len() as u32).to_be_bytes()).await?;
+    tls_stream.write_all(&response_json).await?;
+    tls_stream.flush().await?;
+
+    // 如果认证失败，断开连接
+    if !response.success {
         return Err(anyhow::anyhow!("Authentication failed"));
     }
-
-    info!("Client authenticated successfully");
-    tls_stream.write_all(&[1]).await?;
-    tls_stream.flush().await?;
 
     let client_configs = read_client_configs(&mut tls_stream).await?;
 
@@ -247,8 +258,10 @@ async fn handle_client_transport(
     if let Err(e) = validate_proxy_configs(&client_configs.proxies, state.config.bind_port) {
         let error_msg = format!("Proxy configuration validation failed: {}", e);
         error!("{}", error_msg);
-        tls_stream.write_all(&[0]).await.ok();
-        send_error_message(&mut tls_stream, &error_msg).await.ok();
+        let validation_resp = ConfigValidationResponse::invalid(error_msg);
+        let resp_json = serde_json::to_vec(&validation_resp)?;
+        tls_stream.write_all(&(resp_json.len() as u32).to_be_bytes()).await.ok();
+        tls_stream.write_all(&resp_json).await.ok();
         return Err(e);
     }
 
@@ -271,15 +284,21 @@ async fn handle_client_transport(
             rejected_proxies.join(", ")
         );
         error!("{}", error_msg);
-        tls_stream.write_all(&[0]).await.ok();
-        send_error_message(&mut tls_stream, &error_msg).await.ok();
+        let validation_resp = ConfigValidationResponse::invalid(error_msg.clone());
+        let resp_json = serde_json::to_vec(&validation_resp)?;
+        tls_stream.write_all(&(resp_json.len() as u32).to_be_bytes()).await.ok();
+        tls_stream.write_all(&resp_json).await.ok();
         return Err(anyhow::anyhow!(error_msg));
     }
 
-    // 发送配置验证成功确认
-    tls_stream.write_all(&[1]).await?;
+    // 发送配置验证成功确认（JSON 格式）
+    let validation_resp = ConfigValidationResponse::valid();
+    let resp_json = serde_json::to_vec(&validation_resp)?;
+    tls_stream.write_all(&(resp_json.len() as u32).to_be_bytes()).await?;
+    tls_stream.write_all(&resp_json).await?;
     tls_stream.flush().await?;
-    info!("Client configurations validated and accepted");
+
+    info!("Client configurations validated");
 
     // 发送配置状态响应给客户端（JSON 格式）
     let status_response = if rejected_proxies.is_empty() {
@@ -422,18 +441,5 @@ async fn handle_client_transport(
     }
 
     info!("All proxy listeners stopped");
-    Ok(())
-}
-
-/// 发送错误消息给客户端
-async fn send_error_message<T>(stream: &mut T, message: &str) -> Result<()>
-where
-    T: tokio::io::AsyncWriteExt + Unpin,
-{
-    let msg_bytes = message.as_bytes();
-    let msg_len = (msg_bytes.len() as u16).to_be_bytes();
-    stream.write_all(&msg_len).await?;
-    stream.write_all(msg_bytes).await?;
-    stream.flush().await?;
     Ok(())
 }
