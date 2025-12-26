@@ -8,7 +8,7 @@ mod visitor;
 
 use crate::config::{ClientFullConfig, ProxyType};
 use crate::connection_pool::ConnectionPool;
-use crate::protocol::{AuthRequest, AuthResponse, ConfigValidationResponse, ConfigStatusResponse};
+use crate::protocol::{AuthRequest, AuthResponse, ConfigStatusResponse, ConfigValidationResponse};
 use crate::transport::create_transport_client;
 use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
 use anyhow::{Context, Result};
@@ -234,7 +234,9 @@ async fn run_client_session(
         auth_key: client_config.auth_key.clone(),
     };
     let request_json = serde_json::to_vec(&auth_request)?;
-    tls_stream.write_all(&(request_json.len() as u32).to_be_bytes()).await?;
+    tls_stream
+        .write_all(&(request_json.len() as u32).to_be_bytes())
+        .await?;
     tls_stream.write_all(&request_json).await?;
     tls_stream.flush().await?;
 
@@ -279,7 +281,10 @@ async fn run_client_session(
             .error
             .unwrap_or_else(|| "Unknown validation error".to_string());
         error!("Server rejected proxy configuration: {}", error_msg);
-        return Err(anyhow::anyhow!("Proxy configuration rejected: {}", error_msg));
+        return Err(anyhow::anyhow!(
+            "Proxy configuration rejected: {}",
+            error_msg
+        ));
     }
 
     info!("Server accepted proxy configurations");
@@ -288,10 +293,10 @@ async fn run_client_session(
     let mut len_buf = [0u8; 4];
     tls_stream.read_exact(&mut len_buf).await?;
     let response_len = u32::from_be_bytes(len_buf) as usize;
-    
+
     let mut response_buf = vec![0u8; response_len];
     tls_stream.read_exact(&mut response_buf).await?;
-    
+
     let status_response: ConfigStatusResponse = serde_json::from_slice(&response_buf)
         .context("Failed to parse config status response JSON")?;
 

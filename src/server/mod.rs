@@ -8,7 +8,7 @@ mod yamux;
 pub use registry::ProxyRegistry;
 
 use crate::config::ServerConfig;
-use crate::protocol::{AuthRequest, AuthResponse, ConfigValidationResponse, ConfigStatusResponse};
+use crate::protocol::{AuthRequest, AuthResponse, ConfigStatusResponse, ConfigValidationResponse};
 use crate::stats::StatsManager;
 use crate::transport::create_transport_server;
 use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
@@ -221,14 +221,17 @@ async fn handle_client_transport(
         let error_msg = "Authentication request too large";
         let response = AuthResponse::failed(error_msg.to_string());
         let response_json = serde_json::to_vec(&response)?;
-        tls_stream.write_all(&(response_json.len() as u32).to_be_bytes()).await.ok();
+        tls_stream
+            .write_all(&(response_json.len() as u32).to_be_bytes())
+            .await
+            .ok();
         tls_stream.write_all(&response_json).await.ok();
         return Err(anyhow::anyhow!("Request too large"));
     }
 
     let mut request_buf = vec![0u8; request_len];
     tls_stream.read_exact(&mut request_buf).await?;
-    
+
     let auth_request: AuthRequest = serde_json::from_slice(&request_buf)
         .context("Failed to parse authentication request JSON")?;
 
@@ -243,7 +246,9 @@ async fn handle_client_transport(
 
     // 发送认证响应（JSON 格式，带长度前缀）
     let response_json = serde_json::to_vec(&response)?;
-    tls_stream.write_all(&(response_json.len() as u32).to_be_bytes()).await?;
+    tls_stream
+        .write_all(&(response_json.len() as u32).to_be_bytes())
+        .await?;
     tls_stream.write_all(&response_json).await?;
     tls_stream.flush().await?;
 
@@ -260,7 +265,10 @@ async fn handle_client_transport(
         error!("{}", error_msg);
         let validation_resp = ConfigValidationResponse::invalid(error_msg);
         let resp_json = serde_json::to_vec(&validation_resp)?;
-        tls_stream.write_all(&(resp_json.len() as u32).to_be_bytes()).await.ok();
+        tls_stream
+            .write_all(&(resp_json.len() as u32).to_be_bytes())
+            .await
+            .ok();
         tls_stream.write_all(&resp_json).await.ok();
         return Err(e);
     }
@@ -278,7 +286,8 @@ async fn handle_client_transport(
     }
 
     // 如果所有代理都会被拒绝，返回错误
-    if !client_configs.proxies.is_empty() && rejected_proxies.len() == client_configs.proxies.len() {
+    if !client_configs.proxies.is_empty() && rejected_proxies.len() == client_configs.proxies.len()
+    {
         let error_msg = format!(
             "All proxies are already registered by other clients: {}",
             rejected_proxies.join(", ")
@@ -286,7 +295,10 @@ async fn handle_client_transport(
         error!("{}", error_msg);
         let validation_resp = ConfigValidationResponse::invalid(error_msg.clone());
         let resp_json = serde_json::to_vec(&validation_resp)?;
-        tls_stream.write_all(&(resp_json.len() as u32).to_be_bytes()).await.ok();
+        tls_stream
+            .write_all(&(resp_json.len() as u32).to_be_bytes())
+            .await
+            .ok();
         tls_stream.write_all(&resp_json).await.ok();
         return Err(anyhow::anyhow!(error_msg));
     }
@@ -294,7 +306,9 @@ async fn handle_client_transport(
     // 发送配置验证成功确认（JSON 格式）
     let validation_resp = ConfigValidationResponse::valid();
     let resp_json = serde_json::to_vec(&validation_resp)?;
-    tls_stream.write_all(&(resp_json.len() as u32).to_be_bytes()).await?;
+    tls_stream
+        .write_all(&(resp_json.len() as u32).to_be_bytes())
+        .await?;
     tls_stream.write_all(&resp_json).await?;
     tls_stream.flush().await?;
 
@@ -340,7 +354,7 @@ async fn handle_client_transport(
         let mut registry = state.proxy_registry.write().await;
         for proxy in &client_configs.proxies {
             let key = (proxy.name.clone(), proxy.publish_port);
-            
+
             // 检查是否已被其他客户端注册
             if registry.contains_key(&key) {
                 warn!(

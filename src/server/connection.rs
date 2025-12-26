@@ -13,7 +13,7 @@ pub async fn start_proxy_listener(
     tracker: ProxyStatsTracker,
 ) -> Result<()> {
     let addr = format!("{}:{}", proxy.publish_addr, proxy.publish_port);
-    
+
     // 尝试绑定，如果失败则提供更详细的错误信息
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(listener) => listener,
