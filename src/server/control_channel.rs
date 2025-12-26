@@ -18,6 +18,7 @@ pub enum ControlEvent {
     SubmitConfigRequest {
         id: serde_json::Value,
         proxies: Vec<ProxyConfig>,
+        visitors: Vec<crate::config::VisitorConfig>,
     },
 
     /// 收到心跳
@@ -110,6 +111,7 @@ impl ServerControlChannel {
                 let _ = self.event_tx.send(ControlEvent::SubmitConfigRequest {
                     id,
                     proxies: params.proxies,
+                    visitors: params.visitors,
                 });
             }
 

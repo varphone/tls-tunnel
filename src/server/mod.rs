@@ -291,6 +291,7 @@ async fn handle_proxy_config_submission(
     control_stream: &mut ::yamux::Stream,
     id: serde_json::Value,
     proxies: Vec<crate::config::ProxyConfig>,
+    visitors: Vec<crate::config::VisitorConfig>,
 ) -> Result<bool> {
     use std::collections::HashSet;
 
@@ -420,19 +421,45 @@ async fn handle_proxy_config_submission(
         }
     }
 
+    // 验证 visitor 配置：检查对应的 proxy 是否存在
+    let mut rejected_visitors: Vec<String> = Vec::new();
+    if !visitors.is_empty() {
+        let registry = world.state.proxy_registry.read().await;
+        for visitor in &visitors {
+            // visitor 通过 name 和 publish_port 查找对应的 proxy
+            let key = (visitor.name.clone(), visitor.publish_port);
+            if !registry.contains_key(&key) {
+                warn!(
+                    "Visitor '{}' references non-existent proxy '{}:{}', will be unavailable",
+                    visitor.name, visitor.name, visitor.publish_port
+                );
+                rejected_visitors.push(format!("{}:{}", visitor.name, visitor.publish_port));
+            } else {
+                info!(
+                    "Visitor '{}' validated: proxy '{}:{}' exists",
+                    visitor.name, visitor.name, visitor.publish_port
+                );
+            }
+        }
+    }
+
+    // 合并被拒绝的 proxies 和 visitors
+    let mut all_rejected = rejected_proxies.clone();
+    all_rejected.extend(rejected_visitors);
+
     // 发送响应
-    if rejected_proxies.is_empty() {
-        info!("All proxies accepted");
+    if all_rejected.is_empty() {
+        info!("All proxies and visitors accepted");
         control_channel
             .send_config_accepted(control_stream, id)
             .await?;
     } else {
         info!(
-            "Partially accepted: {} proxies rejected",
-            rejected_proxies.len()
+            "Partially accepted: {} item(s) rejected",
+            all_rejected.len()
         );
         control_channel
-            .send_config_partially_rejected(control_stream, id, rejected_proxies)
+            .send_config_partially_rejected(control_stream, id, all_rejected)
             .await?;
     }
 
@@ -604,17 +631,17 @@ async fn run_server_event_loop(
                             }
                         }
 
-                        control_channel::ControlEvent::SubmitConfigRequest { id, proxies } => {
+                        control_channel::ControlEvent::SubmitConfigRequest { id, proxies, visitors } => {
                             // 处理配置请求
                             if world.session_state != SessionState::Authenticated {
                                 warn!("Received config before authentication");
                                 false
                             } else {
                                 world.session_state = SessionState::ConfiguringProxy;
-                                info!("Processing proxy configuration: {} proxies", proxies.len());
+                                info!("Processing proxy configuration: {} proxies, {} visitors", proxies.len(), visitors.len());
 
                                 // 验证并注册代理配置
-                                let result = handle_proxy_config_submission(&mut world, &control_channel, &mut control_stream, id, proxies).await;
+                                let result = handle_proxy_config_submission(&mut world, &control_channel, &mut control_stream, id, proxies, visitors).await;
                                 result.unwrap_or(false)
                             }
                         }

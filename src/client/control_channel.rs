@@ -232,6 +232,7 @@ impl ClientControlChannel {
 
         let params = SubmitConfigParams {
             proxies: self.config.proxies.clone(),
+            visitors: self.config.visitors.clone(),
         };
 
         let request = JsonRpcRequest {

@@ -109,6 +109,8 @@ pub struct AuthenticateResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitConfigParams {
     pub proxies: Vec<crate::config::ProxyConfig>,
+    #[serde(default)]
+    pub visitors: Vec<crate::config::VisitorConfig>,
 }
 
 /// 提交配置响应结果

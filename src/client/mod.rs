@@ -330,14 +330,16 @@ impl ClientWorld {
             control_channel::ControlEvent::ConfigAccepted => {
                 info!("✓ Configuration accepted by server");
                 self.state = ClientState::Running;
-                self.start_listeners().await?;
+                // 所有 proxy 都被接受，可以启动所有 listeners
+                self.start_listeners(Vec::new()).await?;
                 Ok(true)
             }
 
             control_channel::ControlEvent::ConfigPartiallyRejected { rejected_proxies } => {
                 warn!("⚠ Some proxies rejected: {}", rejected_proxies.join(", "));
                 self.state = ClientState::Running;
-                self.start_listeners().await?;
+                // 只启动那些对应 proxy 未被拒绝的 visitors
+                self.start_listeners(rejected_proxies).await?;
                 Ok(true)
             }
 
@@ -421,15 +423,28 @@ impl ClientWorld {
     }
 
     /// 启动监听器（visitor 和 forwarder）
-    async fn start_listeners(&mut self) -> Result<()> {
-        // 启动 visitor 监听器
+    /// rejected_proxies: 被服务器拒绝的 proxy 名称列表（格式：name:port）
+    async fn start_listeners(&mut self, rejected_proxies: Vec<String>) -> Result<()> {
+        // 启动 visitor 监听器（跳过对应 proxy 被拒绝的 visitors）
         if !self.config.visitors.is_empty() {
-            info!(
-                "Starting {} visitor listeners...",
-                self.config.visitors.len()
-            );
+            let rejected_set: std::collections::HashSet<String> =
+                rejected_proxies.into_iter().collect();
+            let mut started_count = 0;
+            let mut skipped_count = 0;
 
             for visitor in &self.config.visitors {
+                // 检查此 visitor 对应的 proxy 是否被拒绝
+                // 服务器返回的格式是 "name:port"，需要构造相同格式进行匹配
+                let visitor_key = format!("{}:{}", visitor.name, visitor.publish_port);
+                if rejected_set.contains(&visitor_key) {
+                    warn!(
+                        "Visitor '{}': Skipping start - corresponding proxy '{}' was rejected by server",
+                        visitor.name, visitor_key
+                    );
+                    skipped_count += 1;
+                    continue;
+                }
+
                 let visitor_clone = visitor.clone();
                 let visitor_name = visitor.name.clone();
                 let stream_tx_clone = self.visitor_stream_tx.clone();
@@ -442,6 +457,17 @@ impl ClientWorld {
                         error!("Visitor '{}' listener error: {}", visitor_name, e);
                     }
                 });
+                started_count += 1;
+            }
+
+            if started_count > 0 {
+                info!("Started {} visitor listener(s)", started_count);
+            }
+            if skipped_count > 0 {
+                info!(
+                    "Skipped {} visitor(s) due to rejected proxies",
+                    skipped_count
+                );
             }
         }
 
