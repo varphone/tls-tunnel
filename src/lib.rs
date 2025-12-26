@@ -8,6 +8,7 @@ pub mod connection_pool;
 pub mod error;
 pub mod io_util;
 pub mod limited_reader;
+pub mod protocol;
 pub mod rate_limiter;
 pub mod server;
 pub mod stats;

@@ -8,6 +8,7 @@ mod yamux;
 pub use registry::ProxyRegistry;
 
 use crate::config::ServerConfig;
+use crate::protocol::ConfigStatusResponse;
 use crate::stats::StatsManager;
 use crate::transport::create_transport_server;
 use ::yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxMode};
@@ -280,14 +281,17 @@ async fn handle_client_transport(
     tls_stream.flush().await?;
     info!("Client configurations validated and accepted");
 
-    // 发送被拒绝的代理列表给客户端
-    // 格式：被拒绝的数量（1字节）+ 对每个被拒绝的代理：名称长度（2字节）+ 名称
-    tls_stream.write_all(&[rejected_proxies.len() as u8]).await?;
-    for rejected in &rejected_proxies {
-        let name_bytes = rejected.as_bytes();
-        tls_stream.write_all(&(name_bytes.len() as u16).to_be_bytes()).await?;
-        tls_stream.write_all(name_bytes).await?;
-    }
+    // 发送配置状态响应给客户端（JSON 格式）
+    let status_response = if rejected_proxies.is_empty() {
+        ConfigStatusResponse::accepted()
+    } else {
+        ConfigStatusResponse::partially_rejected(rejected_proxies.clone())
+    };
+
+    let response_json = serde_json::to_vec(&status_response)?;
+    let response_len = response_json.len() as u32;
+    tls_stream.write_all(&response_len.to_be_bytes()).await?;
+    tls_stream.write_all(&response_json).await?;
     tls_stream.flush().await?;
 
     if !rejected_proxies.is_empty() {
