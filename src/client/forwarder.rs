@@ -22,8 +22,14 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 1000;
 /// 协议解析超时时间（防止慢速攻击）
 const PROTOCOL_PARSE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// 数据复制缓冲区大小
-const COPY_BUFFER_SIZE: usize = 8192;
+/// 连接空闲超时时间（防止资源泄漏）
+const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60); // 5分钟
+
+/// 数据复制缓冲区大小（64KB 适合高吞吐）
+const COPY_BUFFER_SIZE: usize = 65536;
+
+/// HTTP 协议解析缓冲区大小
+const HTTP_PARSE_BUFFER_SIZE: usize = 16384;
 
 /// 快速失败配置
 const FAILED_TARGET_THRESHOLD: u32 = 3; // 失败次数阈值
@@ -153,8 +159,9 @@ impl Default for FailedTargetManager {
     }
 }
 
-/// 实时统计的数据复制函数
+/// 实时统计的数据复制函数（带超时保护）
 /// 相比 tokio::io::copy，这个函数会在每次复制数据后立即更新统计信息
+/// 并在连接空闲超过 CONNECTION_IDLE_TIMEOUT 时自动关闭
 async fn copy_with_stats<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -165,11 +172,27 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    use tokio::time::timeout;
+
     let mut buf = vec![0u8; COPY_BUFFER_SIZE];
     let mut total_copied = 0u64;
 
     loop {
-        let n = reader.read(&mut buf).await?;
+        // 使用 timeout 防止连接永久挂起（连接空闲超时保护）
+        let result = timeout(CONNECTION_IDLE_TIMEOUT, reader.read(&mut buf)).await;
+        
+        let n = match result {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                // 超时：连接5分钟无数据传输，主动关闭
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Connection idle timeout",
+                ));
+            }
+        };
+
         if n == 0 {
             break;
         }
@@ -227,6 +250,11 @@ pub async fn run_forwarder_listener(
     loop {
         match listener.accept().await {
             Ok((local_stream, peer_addr)) => {
+                // 优化 TCP 选项以降低延迟和防止连接断开
+                if let Err(e) = local_stream.set_nodelay(true) {
+                    warn!("Failed to set TCP_NODELAY: {}", e);
+                }
+
                 // 尝试获取连接许可
                 let permit = match connection_limiter.clone().try_acquire_owned() {
                     Ok(permit) => permit,
@@ -512,43 +540,49 @@ async fn parse_http_connect(stream: &mut TcpStream) -> Result<String> {
 
     // 使用超时包装整个解析过程
     let result = timeout(PROTOCOL_PARSE_TIMEOUT, async {
-        let mut buffer = Vec::new();
-        let mut temp = [0u8; 1];
+        let mut buffer = vec![0u8; HTTP_PARSE_BUFFER_SIZE];
+        let mut pos = 0;
 
-        // 读取到第一个 \r\n\r\n
+        // 读取到第一个 \r\n\r\n（使用缓冲读取而非逐字节）
         loop {
-            stream.read_exact(&mut temp).await?;
-            buffer.push(temp[0]);
+            let n = stream.read(&mut buffer[pos..]).await?;
+            if n == 0 {
+                anyhow::bail!("Unexpected EOF while reading HTTP request");
+            }
+            pos += n;
 
-            if buffer.len() >= 4 && &buffer[buffer.len() - 4..] == b"\r\n\r\n" {
-                break;
+            // 查找 \r\n\r\n
+            if pos >= 4 {
+                for i in 0..=pos - 4 {
+                    if &buffer[i..i + 4] == b"\r\n\r\n" {
+                        // 找到请求结束
+                        let request = String::from_utf8_lossy(&buffer[..i + 4]);
+                        let first_line = request
+                            .lines()
+                            .next()
+                            .ok_or_else(|| anyhow::anyhow!("Empty HTTP request"))?;
+
+                        // 解析：CONNECT example.com:443 HTTP/1.1
+                        let parts: Vec<&str> = first_line.split_whitespace().collect();
+                        if parts.len() < 2 {
+                            anyhow::bail!("Invalid HTTP CONNECT request");
+                        }
+
+                        if parts[0] != "CONNECT" {
+                            anyhow::bail!("Only CONNECT method is supported");
+                        }
+
+                        let target = parts[1].to_string();
+                        return Ok::<String, anyhow::Error>(target);
+                    }
+                }
             }
 
             // 防止超长请求
-            if buffer.len() > 8192 {
+            if pos >= HTTP_PARSE_BUFFER_SIZE {
                 anyhow::bail!("HTTP request too long");
             }
         }
-
-        let request = String::from_utf8_lossy(&buffer);
-        let first_line = request
-            .lines()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Empty HTTP request"))?;
-
-        // 解析：CONNECT example.com:443 HTTP/1.1
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        if parts.len() < 2 {
-            anyhow::bail!("Invalid HTTP CONNECT request");
-        }
-
-        if parts[0] != "CONNECT" {
-            anyhow::bail!("Only CONNECT method is supported");
-        }
-
-        let target = parts[1].to_string();
-
-        Ok::<String, anyhow::Error>(target)
     })
     .await
     .map_err(|_| {
@@ -789,6 +823,10 @@ async fn handle_direct_connection(
     // 直接连接目标服务器
     let mut remote_stream = match TcpStream::connect(target).await {
         Ok(stream) => {
+            // 优化 TCP 选项以降低延迟
+            if let Err(e) = stream.set_nodelay(true) {
+                warn!("Failed to set TCP_NODELAY on remote: {}", e);
+            }
             info!(
                 "Forwarder '{}': Successfully connected directly to {}",
                 forwarder_name, target
