@@ -15,23 +15,22 @@ pub struct JsonRpcRequest {
     /// 方法名
     pub method: String,
     
-    /// 参数（可选）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub params: Option<Value>,
+    /// 参数
+    pub params: Value,
     
     /// 请求 ID（用于匹配响应，通知时为 None）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<u64>,
+    pub id: Option<Value>,
 }
 
 impl JsonRpcRequest {
     /// 创建新的请求
-    pub fn new(method: String, params: Option<Value>, id: u64) -> Self {
+    pub fn new(method: String, params: Value, id: u64) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             method,
             params,
-            id: Some(id),
+            id: Some(Value::Number(id.into())),
         }
     }
     
@@ -56,12 +55,12 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
     
     /// 请求 ID（对应请求的 ID）
-    pub id: u64,
+    pub id: Value,
 }
 
 impl JsonRpcResponse {
     /// 创建成功响应
-    pub fn success(id: u64, result: Value) -> Self {
+    pub fn success(id: Value, result: Value) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             result: Some(result),
@@ -71,7 +70,7 @@ impl JsonRpcResponse {
     }
     
     /// 创建错误响应
-    pub fn error(id: u64, error: JsonRpcError) -> Self {
+    pub fn error(id: Value, error: JsonRpcError) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             result: None,
@@ -104,23 +103,18 @@ pub struct AuthenticateParams {
 /// 认证响应结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticateResult {
-    pub success: bool,
-    pub client_id: Option<String>,
+    pub client_id: String,
 }
 
 /// 提交配置请求参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitConfigParams {
-    pub proxies: Vec<Value>,
-    pub visitors: Vec<Value>,
-    pub forwarders: Vec<Value>,
+    pub proxies: Vec<crate::config::ProxyConfig>,
 }
 
 /// 提交配置响应结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitConfigResult {
-    pub valid: bool,
-    pub accepted: bool,
     pub rejected_proxies: Vec<String>,
 }
 
@@ -147,14 +141,14 @@ pub enum ControlMethod {
 
 impl ControlMethod {
     /// 从字符串解析
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_str(s: &str) -> anyhow::Result<Self> {
         match s {
-            "authenticate" => Some(ControlMethod::Authenticate),
-            "submit_config" => Some(ControlMethod::SubmitConfig),
-            "heartbeat" => Some(ControlMethod::Heartbeat),
-            "push_config_status" => Some(ControlMethod::PushConfigStatus),
-            "push_stats" => Some(ControlMethod::PushStats),
-            _ => None,
+            "authenticate" => Ok(ControlMethod::Authenticate),
+            "submit_config" => Ok(ControlMethod::SubmitConfig),
+            "heartbeat" => Ok(ControlMethod::Heartbeat),
+            "push_config_status" => Ok(ControlMethod::PushConfigStatus),
+            "push_stats" => Ok(ControlMethod::PushStats),
+            _ => Err(anyhow::anyhow!("Unknown control method: {}", s)),
         }
     }
     

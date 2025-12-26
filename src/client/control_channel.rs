@@ -108,7 +108,13 @@ impl ClientControlChannel {
     
     /// 处理响应消息
     async fn handle_response(&mut self, response: JsonRpcResponse) -> Result<()> {
-        let request_id = response.id;
+        // 从 Value 中提取 u64
+        let request_id = if let Value::Number(n) = &response.id {
+            n.as_u64().unwrap_or(0)
+        } else {
+            warn!("Invalid response ID type: {:?}", response.id);
+            return Ok(());
+        };
         
         // 查找并移除待处理的请求
         let sender = {
@@ -131,14 +137,10 @@ impl ClientControlChannel {
         
         match request.method.as_str() {
             "config_status_push" => {
-                if let Some(params) = request.params {
-                    debug!("Config status push params: {:?}", params);
-                }
+                debug!("Config status push params: {:?}", request.params);
             }
             "stats_push" => {
-                if let Some(params) = request.params {
-                    debug!("Stats push params: {:?}", params);
-                }
+                debug!("Stats push params: {:?}", request.params);
             }
             _ => {
                 warn!("Unknown notification method: {}", request.method);
@@ -161,8 +163,8 @@ impl ClientControlChannel {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "authenticate".to_string(),
-            params: Some(serde_json::to_value(params)?),
-            id: Some(request_id),
+            params: serde_json::to_value(params)?,
+            id: Some(Value::Number(request_id.into())),
         };
         
         let data = serde_json::to_vec(&request)?;
@@ -187,15 +189,9 @@ impl ClientControlChannel {
                     Ok(Ok(response)) => {
                         if let Some(result) = response.result {
                             if let Ok(auth_result) = serde_json::from_value::<AuthenticateResult>(result) {
-                                if auth_result.success {
-                                    let _ = event_tx.send(ControlEvent::AuthenticationSuccess {
-                                        client_id: auth_result.client_id.unwrap_or_else(|| "unknown".to_string()),
-                                    });
-                                } else {
-                                    let _ = event_tx.send(ControlEvent::AuthenticationFailed {
-                                        reason: "Authentication rejected".to_string(),
-                                    });
-                                }
+                                let _ = event_tx.send(ControlEvent::AuthenticationSuccess {
+                                    client_id: auth_result.client_id,
+                                });
                             }
                         } else if let Some(error) = response.error {
                             let _ = event_tx.send(ControlEvent::AuthenticationFailed {
@@ -227,36 +223,15 @@ impl ClientControlChannel {
         
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         
-        // 构建代理配置列表
-        let proxies: Vec<Value> = self.config.proxies.iter().map(|p| {
-            let proxy_type_str = match p.proxy_type {
-                crate::config::ProxyType::Tcp => "tcp",
-                crate::config::ProxyType::Http11 => "http11",
-                crate::config::ProxyType::Http2 => "http2",
-                crate::config::ProxyType::Ssh => "ssh",
-                crate::config::ProxyType::HttpProxy => "http",
-                crate::config::ProxyType::Socks5Proxy => "socks5",
-            };
-            
-            serde_json::json!({
-                "name": p.name,
-                "publish_port": p.publish_port,
-                "proxy_type": proxy_type_str,
-                "local_port": p.local_port,
-            })
-        }).collect();
-        
         let params = SubmitConfigParams {
-            proxies,
-            visitors: vec![],
-            forwarders: vec![],
+            proxies: self.config.proxies.clone(),
         };
         
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "submit_config".to_string(),
-            params: Some(serde_json::to_value(params)?),
-            id: Some(request_id),
+            params: serde_json::to_value(params)?,
+            id: Some(Value::Number(request_id.into())),
         };
         
         let data = serde_json::to_vec(&request)?;
@@ -281,23 +256,30 @@ impl ClientControlChannel {
                     Ok(Ok(response)) => {
                         if let Some(result) = response.result {
                             if let Ok(config_result) = serde_json::from_value::<SubmitConfigResult>(result) {
-                                if config_result.accepted {
-                                    if config_result.rejected_proxies.is_empty() {
-                                        let _ = event_tx.send(ControlEvent::ConfigAccepted);
-                                    } else {
-                                        let _ = event_tx.send(ControlEvent::ConfigPartiallyRejected {
-                                            rejected_proxies: config_result.rejected_proxies,
-                                        });
-                                    }
+                                if config_result.rejected_proxies.is_empty() {
+                                    let _ = event_tx.send(ControlEvent::ConfigAccepted);
                                 } else {
-                                    let _ = event_tx.send(ControlEvent::ConfigRejected {
+                                    let _ = event_tx.send(ControlEvent::ConfigPartiallyRejected {
                                         rejected_proxies: config_result.rejected_proxies,
                                     });
                                 }
                             }
                         } else if let Some(error) = response.error {
+                            // 从错误数据中提取 rejected_proxies
+                            let rejected_proxies = if let Some(data) = error.data {
+                                if let Ok(rejected) = serde_json::from_value::<Vec<String>>(
+                                    data.get("rejected_proxies").cloned().unwrap_or(Value::Array(vec![]))
+                                ) {
+                                    rejected
+                                } else {
+                                    vec![error.message.clone()]
+                                }
+                            } else {
+                                vec![error.message.clone()]
+                            };
+                            
                             let _ = event_tx.send(ControlEvent::ConfigRejected {
-                                rejected_proxies: vec![error.message],
+                                rejected_proxies,
                             });
                         }
                     }
@@ -326,7 +308,7 @@ impl ClientControlChannel {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "heartbeat".to_string(),
-            params: None,
+            params: Value::Null,
             id: None, // 通知，无需响应
         };
         
