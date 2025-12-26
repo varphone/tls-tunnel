@@ -260,8 +260,6 @@ async fn run_client_session(
     // 创建客户端世界对象
     let world = ClientWorld {
         yamux_conn,
-        control_stream,
-        control_channel,
         event_rx,
         visitor_stream_rx,
         config,
@@ -274,7 +272,7 @@ async fn run_client_session(
     };
 
     // 运行统一事件循环
-    run_client_event_loop(world).await?;
+    run_client_event_loop(world, control_stream, control_channel).await?;
 
     info!("Client disconnected");
     Ok(())
@@ -292,8 +290,6 @@ enum ClientState {
 /// 客户端世界 - 统一管理所有共享资源
 struct ClientWorld {
     yamux_conn: YamuxConnection<tokio_util::compat::Compat<std::pin::Pin<Box<dyn crate::transport::Transport>>>>,
-    control_stream: yamux::Stream,
-    control_channel: control_channel::ClientControlChannel,
     event_rx: tokio::sync::mpsc::UnboundedReceiver<control_channel::ControlEvent>,
     visitor_stream_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     config: Arc<ClientFullConfig>,
@@ -307,13 +303,18 @@ struct ClientWorld {
 
 impl ClientWorld {
     /// 处理控制通道事件
-    async fn handle_control_event(&mut self, event: control_channel::ControlEvent) -> Result<bool> {
+    async fn handle_control_event(
+        &mut self, 
+        event: control_channel::ControlEvent,
+        control_channel: &mut control_channel::ClientControlChannel,
+        control_stream: &mut yamux::Stream,
+    ) -> Result<bool> {
         match event {
             control_channel::ControlEvent::AuthenticationSuccess { client_id } => {
                 info!("✓ Authentication successful: {}", client_id);
                 self.state = ClientState::Authenticated;
                 self.initialize_resources().await?;
-                self.submit_config().await?;
+                self.submit_config(control_channel, control_stream).await?;
                 Ok(true)
             }
 
@@ -404,10 +405,14 @@ impl ClientWorld {
     }
 
     /// 提交配置
-    async fn submit_config(&mut self) -> Result<()> {
+    async fn submit_config(
+        &mut self,
+        control_channel: &mut control_channel::ClientControlChannel,
+        control_stream: &mut yamux::Stream,
+    ) -> Result<()> {
         self.state = ClientState::ConfiguringProxy;
         info!("Submitting proxy configuration");
-        self.control_channel.send_submit_config(&mut self.control_stream).await
+        control_channel.send_submit_config(control_stream).await
     }
 
     /// 启动监听器（visitor 和 forwarder）
@@ -488,12 +493,16 @@ impl ClientWorld {
 
 /// 统一的客户端事件循环
 /// 集中处理：yamux I/O、控制通道事件、visitor 请求、心跳等
-async fn run_client_event_loop(mut world: ClientWorld) -> Result<()> {
+async fn run_client_event_loop(
+    mut world: ClientWorld,
+    mut control_stream: yamux::Stream,
+    mut control_channel: control_channel::ClientControlChannel,
+) -> Result<()> {
     info!("Starting unified client event loop");
 
     // 开始认证
     info!("Starting authentication");
-    if let Err(e) = world.control_channel.send_authenticate(&mut world.control_stream).await {
+    if let Err(e) = control_channel.send_authenticate(&mut control_stream).await {
         error!("Failed to send authentication: {}", e);
         return Err(e);
     }
@@ -501,11 +510,46 @@ async fn run_client_event_loop(mut world: ClientWorld) -> Result<()> {
     // 主事件循环
     loop {
         tokio::select! {
-            // 1. 处理控制流的读取
-            read_result = world.control_channel.read_message(&mut world.control_stream) => {
+            // 1. 驱动 yamux 连接并处理 inbound streams（始终运行以处理 ping/pong）
+            stream_result = poll_fn(|cx| world.yamux_conn.poll_next_inbound(cx)) => {
+                match stream_result {
+                    Some(Ok(stream)) if world.state == ClientState::Running => {
+                        debug!("Received new stream from server");
+
+                        if let Some(ref pools) = world.proxy_pools {
+                            let config_clone = (*world.config).clone();
+                            let pools_clone = pools.clone();
+                            let mgr_clone = world.stats_manager.clone();
+
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_stream(stream, config_clone, pools_clone, mgr_clone).await {
+                                    error!("Stream handling error: {}", e);
+                                }
+                            });
+                        }
+                    }
+                    Some(Ok(_stream)) => {
+                        // 在非 Running 状态收到 stream，忽略
+                        debug!("Ignoring inbound stream in non-running state");
+                    }
+                    Some(Err(e)) => {
+                        error!("Yamux error: {}", e);
+                        let _ = world.shutdown_tx.send(());
+                        break;
+                    }
+                    None => {
+                        info!("Yamux connection closed by server");
+                        let _ = world.shutdown_tx.send(());
+                        break;
+                    }
+                }
+            }
+
+            // 2. 处理控制流的读取
+            read_result = control_channel.read_message(&mut control_stream) => {
                 match read_result {
                     Ok(Some(message)) => {
-                        if let Err(e) = world.control_channel.handle_notification(message).await {
+                        if let Err(e) = control_channel.handle_notification(message).await {
                             error!("Failed to handle control message: {}", e);
                         }
                     }
@@ -522,47 +566,16 @@ async fn run_client_event_loop(mut world: ClientWorld) -> Result<()> {
                 }
             }
 
-            // 2. 处理控制通道事件
+            // 3. 处理控制通道事件
             event = world.event_rx.recv() => {
                 if let Some(event) = event {
-                    if !world.handle_control_event(event).await? {
+                    if !world.handle_control_event(event, &mut control_channel, &mut control_stream).await? {
                         break;
                     }
                 } else {
                     error!("Control event stream closed");
                     let _ = world.shutdown_tx.send(());
                     break;
-                }
-            }
-
-            // 3. 处理 yamux inbound streams（仅在 Running 状态）
-            stream_result = poll_fn(|cx| world.yamux_conn.poll_next_inbound(cx)), if world.state == ClientState::Running => {
-                match stream_result {
-                    Some(Ok(stream)) => {
-                        debug!("Received new stream from server");
-
-                        if let Some(ref pools) = world.proxy_pools {
-                            let config_clone = (*world.config).clone();
-                            let pools_clone = pools.clone();
-                            let mgr_clone = world.stats_manager.clone();
-
-                            tokio::spawn(async move {
-                                if let Err(e) = handle_stream(stream, config_clone, pools_clone, mgr_clone).await {
-                                    error!("Stream handling error: {}", e);
-                                }
-                            });
-                        }
-                    }
-                    Some(Err(e)) => {
-                        error!("Yamux error: {}", e);
-                        let _ = world.shutdown_tx.send(());
-                        break;
-                    }
-                    None => {
-                        info!("Yamux connection closed by server");
-                        let _ = world.shutdown_tx.send(());
-                        break;
-                    }
                 }
             }
 
@@ -577,7 +590,7 @@ async fn run_client_event_loop(mut world: ClientWorld) -> Result<()> {
             // 5. 定时心跳（仅在 Running 状态）
             _ = world.heartbeat_interval.tick(), if world.state == ClientState::Running => {
                 debug!("Sending heartbeat");
-                if let Err(e) = world.control_channel.send_heartbeat(&mut world.control_stream).await {
+                if let Err(e) = control_channel.send_heartbeat(&mut control_stream).await {
                     warn!("Failed to send heartbeat: {}", e);
                 }
             }

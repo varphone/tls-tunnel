@@ -211,9 +211,7 @@ enum SessionState {
 /// 服务器世界 - 统一管理所有共享资源
 struct ServerWorld {
     yamux_conn: YamuxConnection<tokio_util::compat::Compat<std::pin::Pin<Box<dyn crate::transport::Transport>>>>,
-    control_stream: ::yamux::Stream,
-    control_channel: control_channel::ServerControlChannel,
-    event_rx: tokio::sync::mpsc::UnboundedReceiver<control_channel::ControlEvent>,
+
     state: Arc<ServerState>,
     session_state: SessionState,
     stream_tx: mpsc::Sender<(mpsc::Sender<::yamux::Stream>, u16, String)>,
@@ -224,216 +222,6 @@ struct ServerWorld {
 }
 
 impl ServerWorld {
-    /// 处理控制事件
-    async fn handle_control_event(&mut self, event: control_channel::ControlEvent) -> Result<bool> {
-        match event {
-            control_channel::ControlEvent::AuthenticateRequest { id, auth_key } => {
-                if auth_key == self.state.config.auth_key {
-                    let client_id = format!("client_{}", uuid::Uuid::new_v4());
-                    info!("Client authenticated successfully: {}", client_id);
-
-                    self.control_channel
-                        .send_auth_success(&mut self.control_stream, id, client_id.clone())
-                        .await?;
-
-                    self.client_id = Some(client_id);
-                    self.session_state = SessionState::Authenticated;
-                } else {
-                    warn!("Authentication failed: invalid key");
-                    self.control_channel
-                        .send_auth_failure(&mut self.control_stream, id, "Invalid authentication key".to_string())
-                        .await?;
-                    return Ok(false);
-                }
-            }
-
-            control_channel::ControlEvent::SubmitConfigRequest { id, proxies } => {
-                if self.session_state != SessionState::Authenticated {
-                    warn!("Received config before authentication");
-                    return Ok(false);
-                }
-
-                self.session_state = SessionState::ConfiguringProxy;
-                info!("Processing proxy configuration: {} proxies", proxies.len());
-
-                // 验证代理配置
-                {
-                    use std::collections::HashSet;
-                    let mut seen_names = HashSet::new();
-                    let mut seen_bind = HashSet::new();
-                    
-                    for proxy in &proxies {
-                        // 检查 name 唯一性
-                        if !seen_names.insert(&proxy.name) {
-                            error!("Duplicate proxy name '{}'", proxy.name);
-                            self.control_channel
-                                .send_config_rejected(&mut self.control_stream, id, vec![format!("Duplicate proxy name: {}", proxy.name)])
-                                .await?;
-                            return Ok(false);
-                        }
-                        
-                        // 检查 (publish_addr, publish_port) 唯一性
-                        if !seen_bind.insert((proxy.publish_addr.clone(), proxy.publish_port)) {
-                            error!("Duplicate publish binding {}:{}", proxy.publish_addr, proxy.publish_port);
-                            self.control_channel
-                                .send_config_rejected(&mut self.control_stream, id, vec![format!("Duplicate binding: {}:{}", proxy.publish_addr, proxy.publish_port)])
-                                .await?;
-                            return Ok(false);
-                        }
-                        
-                        // 验证端口和地址有效性
-                        if proxy.publish_port == 0 || proxy.local_port == 0 || proxy.publish_addr.trim().is_empty() || proxy.name.trim().is_empty() {
-                            error!("Invalid proxy configuration: {}", proxy.name);
-                            self.control_channel
-                                .send_config_rejected(&mut self.control_stream, id, vec![format!("Invalid proxy: {}", proxy.name)])
-                                .await?;
-                            return Ok(false);
-                        }
-                        
-                        // 检查是否与服务器端口冲突
-                        if proxy.publish_port == self.state.config.bind_port {
-                            error!("Proxy '{}' port conflicts with server port", proxy.name);
-                            self.control_channel
-                                .send_config_rejected(&mut self.control_stream, id, vec![format!("Port conflict: {}", proxy.name)])
-                                .await?;
-                            return Ok(false);
-                        }
-                    }
-                }
-
-                // 预检查哪些代理会被拒绝
-                let mut rejected_proxies: Vec<String> = Vec::new();
-                {
-                    let registry = self.state.proxy_registry.read().await;
-                    for proxy in &proxies {
-                        let key = (proxy.name.clone(), proxy.publish_port);
-                        if registry.contains_key(&key) {
-                            rejected_proxies.push(format!("{}:{}", proxy.name, proxy.publish_port));
-                        }
-                    }
-                }
-
-                // 如果所有代理都会被拒绝
-                if !proxies.is_empty() && rejected_proxies.len() == proxies.len() {
-                    error!("All proxies rejected: {}", rejected_proxies.join(", "));
-                    self.control_channel
-                        .send_config_rejected(&mut self.control_stream, id, rejected_proxies)
-                        .await?;
-                    return Ok(false);
-                }
-
-                // 注册代理
-                {
-                    let mut registry = self.state.proxy_registry.write().await;
-                    for proxy in &proxies {
-                        let key = (proxy.name.clone(), proxy.publish_port);
-
-                        if registry.contains_key(&key) {
-                            warn!(
-                                "Proxy '{}' with publish_port {} is already registered, skipping",
-                                proxy.name, proxy.publish_port
-                            );
-                        } else {
-                            info!(
-                                "Registering proxy '{}' with publish_port {}",
-                                proxy.name, proxy.publish_port
-                            );
-                            
-                            let proxy_info = registry::ProxyInfo {
-                                name: proxy.name.clone(),
-                                proxy_type: proxy.proxy_type,
-                                publish_addr: proxy.publish_addr.clone(),
-                                publish_port: proxy.publish_port,
-                                local_port: proxy.local_port,
-                            };
-                            
-                            registry.insert(
-                                key.clone(),
-                                registry::ProxyRegistration {
-                                    stream_tx: self.stream_tx.clone(),
-                                    proxy_info,
-                                },
-                            );
-                            self.proxy_keys.push(key);
-                        }
-                    }
-                }
-
-                // 发送响应
-                if rejected_proxies.is_empty() {
-                    info!("All proxies accepted");
-                    self.control_channel
-                        .send_config_accepted(&mut self.control_stream, id)
-                        .await?;
-                } else {
-                    info!("Partially accepted: {} proxies rejected", rejected_proxies.len());
-                    self.control_channel
-                        .send_config_partially_rejected(&mut self.control_stream, id, rejected_proxies)
-                        .await?;
-                }
-
-                self.session_state = SessionState::Running;
-
-                // 启动代理监听器
-                self.start_proxy_listeners(proxies).await?;
-            }
-
-            control_channel::ControlEvent::Heartbeat => {
-                debug!("Received heartbeat from client");
-            }
-
-            control_channel::ControlEvent::ConnectionClosed => {
-                info!("Control channel closed by client");
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-
-    /// 启动代理监听器
-    async fn start_proxy_listeners(&mut self, proxies: Vec<crate::config::ProxyConfig>) -> Result<()> {
-        for proxy in proxies {
-            // 将 ProxyConfig 转换为 ProxyInfo
-            let proxy_info = registry::ProxyInfo {
-                name: proxy.name.clone(),
-                proxy_type: proxy.proxy_type,
-                publish_addr: proxy.publish_addr.clone(),
-                publish_port: proxy.publish_port,
-                local_port: proxy.local_port,
-            };
-
-            // 注册统计追踪器
-            let tracker = self.state.stats_manager.register_proxy(
-                proxy_info.name.clone(),
-                proxy_info.publish_addr.clone(),
-                proxy_info.publish_port,
-                proxy_info.local_port,
-            );
-
-            let stream_tx_clone = self.stream_tx.clone();
-            let mut shutdown_rx = self.shutdown_tx.subscribe();
-            let stats_manager = self.state.stats_manager.clone();
-            let proxy_name = proxy_info.name.clone();
-
-            tokio::spawn(async move {
-                tokio::select! {
-                    result = start_proxy_listener_with_notify(proxy_info, stream_tx_clone, tracker, None) => {
-                        if let Err(e) = result {
-                            error!("Proxy listener error: {}", e);
-                        }
-                    }
-                    _ = shutdown_rx.recv() => {
-                        info!("Proxy listener shutting down due to disconnection");
-                    }
-                }
-                stats_manager.unregister_proxy(&proxy_name);
-            });
-        }
-
-        Ok(())
-    }
-
     /// 清理资源
     async fn cleanup(&mut self) {
         info!("Cleaning up server resources");
@@ -466,15 +254,7 @@ async fn handle_client_transport(
 
     info!("Yamux connection established");
 
-    // 等待客户端创建控制流
-    let control_stream = poll_fn(|cx| yamux_conn.poll_next_inbound(cx))
-        .await
-        .context("No control stream received")?
-        .context("Failed to accept control stream")?;
-
-    info!("Control stream established");
-
-    // 创建控制通道
+    // 创建控制通道（在获取控制流之前）
     let (control_channel, event_rx) = control_channel::ServerControlChannel::new();
 
     // 创建channel用于请求新的yamux streams
@@ -483,12 +263,9 @@ async fn handle_client_transport(
     // 创建broadcast channel用于监控yamux连接状态
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
-    // 创建服务器世界对象
+    // 创建服务器世界对象（包含 yamux_conn，用于在事件循环中 poll）
     let world = ServerWorld {
         yamux_conn,
-        control_stream,
-        control_channel,
-        event_rx,
         state,
         session_state: SessionState::Authenticating,
         stream_tx,
@@ -499,22 +276,254 @@ async fn handle_client_transport(
     };
 
     // 运行统一事件循环
-    run_server_event_loop(world).await?;
+    run_server_event_loop(world, control_channel, event_rx).await?;
 
     info!("Client disconnected");
     Ok(())
 }
 
+/// 处理代理配置提交（独立函数避免借用冲突）
+async fn handle_proxy_config_submission(
+    world: &mut ServerWorld,
+    control_channel: &control_channel::ServerControlChannel,
+    control_stream: &mut ::yamux::Stream,
+    id: serde_json::Value,
+    proxies: Vec<crate::config::ProxyConfig>,
+) -> Result<bool> {
+    use std::collections::HashSet;
+    
+    // 验证代理配置
+    let mut seen_names = HashSet::new();
+    let mut seen_bind = HashSet::new();
+    
+    for proxy in &proxies {
+        // 检查 name 唯一性
+        if !seen_names.insert(&proxy.name) {
+            error!("Duplicate proxy name '{}'", proxy.name);
+            control_channel
+                .send_config_rejected(control_stream, id, vec![format!("Duplicate proxy name: {}", proxy.name)])
+                .await?;
+            return Ok(false);
+        }
+        
+        // 检查 (publish_addr, publish_port) 唯一性
+        if !seen_bind.insert((proxy.publish_addr.clone(), proxy.publish_port)) {
+            error!("Duplicate publish binding {}:{}", proxy.publish_addr, proxy.publish_port);
+            control_channel
+                .send_config_rejected(control_stream, id, vec![format!("Duplicate binding: {}:{}", proxy.publish_addr, proxy.publish_port)])
+                .await?;
+            return Ok(false);
+        }
+        
+        // 验证端口和地址有效性
+        if proxy.publish_port == 0 || proxy.local_port == 0 || proxy.publish_addr.trim().is_empty() || proxy.name.trim().is_empty() {
+            error!("Invalid proxy configuration: {}", proxy.name);
+            control_channel
+                .send_config_rejected(control_stream, id, vec![format!("Invalid proxy: {}", proxy.name)])
+                .await?;
+            return Ok(false);
+        }
+        
+        // 检查是否与服务器端口冲突
+        if proxy.publish_port == world.state.config.bind_port {
+            error!("Proxy '{}' port conflicts with server port", proxy.name);
+            control_channel
+                .send_config_rejected(control_stream, id, vec![format!("Port conflict: {}", proxy.name)])
+                .await?;
+            return Ok(false);
+        }
+    }
+    
+    // 预检查哪些代理会被拒绝
+    let mut rejected_proxies: Vec<String> = Vec::new();
+    {
+        let registry = world.state.proxy_registry.read().await;
+        for proxy in &proxies {
+            let key = (proxy.name.clone(), proxy.publish_port);
+            if registry.contains_key(&key) {
+                rejected_proxies.push(format!("{}:{}", proxy.name, proxy.publish_port));
+            }
+        }
+    }
+    
+    // 如果所有代理都会被拒绝
+    if !proxies.is_empty() && rejected_proxies.len() == proxies.len() {
+        error!("All proxies rejected: {}", rejected_proxies.join(", "));
+        control_channel
+            .send_config_rejected(control_stream, id, rejected_proxies)
+            .await?;
+        return Ok(false);
+    }
+    
+    // 注册代理
+    {
+        let mut registry = world.state.proxy_registry.write().await;
+        for proxy in &proxies {
+            let key = (proxy.name.clone(), proxy.publish_port);
+
+            if registry.contains_key(&key) {
+                warn!(
+                    "Proxy '{}' with publish_port {} is already registered, skipping",
+                    proxy.name, proxy.publish_port
+                );
+            } else {
+                info!(
+                    "Registering proxy '{}' with publish_port {}",
+                    proxy.name, proxy.publish_port
+                );
+                
+                let proxy_info = registry::ProxyInfo {
+                    name: proxy.name.clone(),
+                    proxy_type: proxy.proxy_type,
+                    publish_addr: proxy.publish_addr.clone(),
+                    publish_port: proxy.publish_port,
+                    local_port: proxy.local_port,
+                };
+                
+                registry.insert(
+                    key.clone(),
+                    registry::ProxyRegistration {
+                        stream_tx: world.stream_tx.clone(),
+                        proxy_info,
+                    },
+                );
+                world.proxy_keys.push(key);
+            }
+        }
+    }
+    
+    // 发送响应
+    if rejected_proxies.is_empty() {
+        info!("All proxies accepted");
+        control_channel
+            .send_config_accepted(control_stream, id)
+            .await?;
+    } else {
+        info!("Partially accepted: {} proxies rejected", rejected_proxies.len());
+        control_channel
+            .send_config_partially_rejected(control_stream, id, rejected_proxies)
+            .await?;
+    }
+    
+    world.session_state = SessionState::Running;
+    
+    // 启动代理监听器
+    start_proxy_listeners_for_world(world, proxies).await?;
+    
+    Ok(true)
+}
+
+/// 启动代理监听器（独立函数）
+async fn start_proxy_listeners_for_world(
+    world: &mut ServerWorld,
+    proxies: Vec<crate::config::ProxyConfig>,
+) -> Result<()> {
+    for proxy in proxies {
+        // 将 ProxyConfig 转换为 ProxyInfo
+        let proxy_info = registry::ProxyInfo {
+            name: proxy.name.clone(),
+            proxy_type: proxy.proxy_type,
+            publish_addr: proxy.publish_addr.clone(),
+            publish_port: proxy.publish_port,
+            local_port: proxy.local_port,
+        };
+
+        // 注册统计追踪器
+        let tracker = world.state.stats_manager.register_proxy(
+            proxy_info.name.clone(),
+            proxy_info.publish_addr.clone(),
+            proxy_info.publish_port,
+            proxy_info.local_port,
+        );
+
+        let stream_tx_clone = world.stream_tx.clone();
+        let mut shutdown_rx = world.shutdown_tx.subscribe();
+        let stats_manager = world.state.stats_manager.clone();
+        let proxy_name = proxy_info.name.clone();
+
+        tokio::spawn(async move {
+            tokio::select! {
+                result = start_proxy_listener_with_notify(proxy_info, stream_tx_clone, tracker, None) => {
+                    if let Err(e) = result {
+                        error!("Proxy listener error: {}", e);
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Proxy listener shutting down due to disconnection");
+                }
+            }
+            stats_manager.unregister_proxy(&proxy_name);
+        });
+    }
+
+    Ok(())
+}
+
 /// 统一的服务器事件循环
 /// 集中处理：yamux I/O、控制通道事件、stream 请求等
-async fn run_server_event_loop(mut world: ServerWorld) -> Result<()> {
+async fn run_server_event_loop(
+    mut world: ServerWorld,
+    control_channel: control_channel::ServerControlChannel,
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<control_channel::ControlEvent>,
+) -> Result<()> {
     info!("Starting unified server event loop");
+
+    // 首先等待客户端创建控制流
+    info!("Waiting for control stream from client");
+    let mut control_stream = loop {
+        tokio::select! {
+            stream_result = poll_fn(|cx| world.yamux_conn.poll_next_inbound(cx)) => {
+                match stream_result {
+                    Some(Ok(stream)) => {
+                        info!("Control stream established");
+                        break stream;
+                    }
+                    Some(Err(e)) => {
+                        error!("Failed to accept control stream: {}", e);
+                        return Err(anyhow::anyhow!("Failed to accept control stream: {}", e));
+                    }
+                    None => {
+                        error!("Yamux connection closed before control stream was established");
+                        return Err(anyhow::anyhow!("Connection closed"));
+                    }
+                }
+            }
+        }
+    };
+
+    info!("Control stream established");
 
     // 主事件循环
     loop {
         tokio::select! {
-            // 1. 处理控制流的读取
-            read_result = world.control_channel.read_message(&mut world.control_stream) => {
+            // 1. 持续驱动 yamux 连接（处理 ping/pong 和 inbound streams）
+            stream_result = poll_fn(|cx| world.yamux_conn.poll_next_inbound(cx)) => {
+                match stream_result {
+                    Some(Ok(stream)) => {
+                        if world.session_state == SessionState::Running {
+                            debug!("Received new inbound stream from client");
+                            // visitor 连接已通过 visitor.rs 处理
+                            // 这里可以处理其他类型的流
+                            warn!("Unexpected inbound stream received");
+                            drop(stream);
+                        } else {
+                            warn!("Received inbound stream before running state, dropping");
+                            drop(stream);
+                        }
+                    }
+                    Some(Err(e)) => {
+                        error!("Yamux error: {}", e);
+                        break;
+                    }
+                    None => {
+                        info!("Yamux connection closed by client");
+                        break;
+                    }
+                }
+            }
+
+            // 2. 处理控制流的读取
+            read_result = control_channel.read_message(&mut control_stream) => {
                 match read_result {
                     Ok(Some(_request)) => {
                         // 请求已被处理并触发了事件
@@ -530,37 +539,68 @@ async fn run_server_event_loop(mut world: ServerWorld) -> Result<()> {
                 }
             }
 
-            // 2. 处理控制通道事件
-            event = world.event_rx.recv() => {
+            // 3. 处理控制通道事件
+            event = event_rx.recv() => {
                 if let Some(event) = event {
-                    if !world.handle_control_event(event).await? {
+                    let continue_loop = match event {
+                        control_channel::ControlEvent::AuthenticateRequest { id, auth_key } => {
+                            if auth_key == world.state.config.auth_key {
+                                let client_id = format!("client_{}", uuid::Uuid::new_v4());
+                                info!("Client authenticated successfully: {}", client_id);
+
+                                if let Err(e) = control_channel
+                                    .send_auth_success(&mut control_stream, id, client_id.clone())
+                                    .await {
+                                    error!("Failed to send auth success: {}", e);
+                                    false
+                                } else {
+                                    world.client_id = Some(client_id);
+                                    world.session_state = SessionState::Authenticated;
+                                    true
+                                }
+                            } else {
+                                warn!("Authentication failed: invalid key");
+                                if let Err(e) = control_channel
+                                    .send_auth_failure(&mut control_stream, id, "Invalid authentication key".to_string())
+                                    .await {
+                                    error!("Failed to send auth failure: {}", e);
+                                }
+                                false
+                            }
+                        }
+                        
+                        control_channel::ControlEvent::SubmitConfigRequest { id, proxies } => {
+                            // 处理配置请求
+                            if world.session_state != SessionState::Authenticated {
+                                warn!("Received config before authentication");
+                                false
+                            } else {
+                                world.session_state = SessionState::ConfiguringProxy;
+                                info!("Processing proxy configuration: {} proxies", proxies.len());
+                                
+                                // 验证并注册代理配置
+                                let result = handle_proxy_config_submission(&mut world, &control_channel, &mut control_stream, id, proxies).await;
+                                result.unwrap_or(false)
+                            }
+                        }
+                        
+                        control_channel::ControlEvent::Heartbeat => {
+                            debug!("Received heartbeat from client");
+                            true
+                        }
+                        
+                        control_channel::ControlEvent::ConnectionClosed => {
+                            info!("Control channel closed by client");
+                            false
+                        }
+                    };
+                    
+                    if !continue_loop {
                         break;
                     }
                 } else {
                     error!("Control event stream closed");
                     break;
-                }
-            }
-
-            // 3. 处理 yamux inbound streams（仅在 Running 状态）
-            stream_result = poll_fn(|cx| world.yamux_conn.poll_next_inbound(cx)), if world.session_state == SessionState::Running => {
-                match stream_result {
-                    Some(Ok(stream)) => {
-                        debug!("Received new inbound stream from client");
-                        
-                        // visitor 连接已通过 visitor.rs 处理
-                        // 这里可以处理其他类型的流
-                        warn!("Unexpected inbound stream received");
-                        drop(stream);
-                    }
-                    Some(Err(e)) => {
-                        error!("Yamux error: {}", e);
-                        break;
-                    }
-                    None => {
-                        info!("Yamux connection closed by client");
-                        break;
-                    }
                 }
             }
 
