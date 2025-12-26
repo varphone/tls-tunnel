@@ -359,7 +359,9 @@ async fn run_client_session(
             let shutdown_rx = shutdown_tx.subscribe();
 
             tokio::spawn(async move {
-                if let Err(e) = run_visitor_listener(visitor_clone, stream_tx_clone, shutdown_rx).await {
+                if let Err(e) =
+                    run_visitor_listener(visitor_clone, stream_tx_clone, shutdown_rx).await
+                {
                     error!("Visitor '{}' listener error: {}", visitor_name, e);
                 }
             });

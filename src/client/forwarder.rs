@@ -515,14 +515,13 @@ async fn handle_forwarder_connection(
             "Forwarder '{}': Target '{}' is blacklisted due to previous failures, rejecting immediately",
             forwarder.name, target
         );
-        let error_response = format!(
-            "HTTP/1.1 503 Service Unavailable\r\n\
+        let error_response = "HTTP/1.1 503 Service Unavailable\r\n\
              Content-Type: text/plain\r\n\
              Content-Length: 47\r\n\
              Connection: close\r\n\
              \r\n\
              Target is temporarily unavailable (blacklisted)"
-        );
+            .to_string();
         local_stream.write_all(error_response.as_bytes()).await.ok();
 
         // 记录连接结束
@@ -829,13 +828,13 @@ async fn handle_http_direct(
     let path = if req.target.starts_with("http") {
         url::Url::parse(&req.target)
             .ok()
-            .and_then(|u| {
+            .map(|u| {
                 let mut path = u.path().to_string();
                 if let Some(query) = u.query() {
                     path.push('?');
                     path.push_str(query);
                 }
-                Some(path)
+                path
             })
             .unwrap_or_else(|| "/".to_string())
     } else {
@@ -1052,7 +1051,7 @@ fn is_unsafe_direct_target(target: &str) -> bool {
     }
 }
 
-/// ============= Forwarder 处理器 =============
+// ============= Forwarder 处理器 =============
 
 /// Forwarder 代理处理器
 pub struct ForwarderHandler {
@@ -1367,7 +1366,7 @@ impl Drop for ReusableConnection {
     }
 }
 
-/// ============= 优化 5: 连接池缓存 =============
+// ============= 优化 5: 连接池缓存 =============
 
 /// 连接池项
 #[allow(dead_code)]
@@ -1399,8 +1398,7 @@ impl ConnectionPool {
         {
             let mut pools = self.pools.write().await;
             if let Some(pool) = pools.get_mut(target) {
-                while !pool.is_empty() {
-                    let pooled = pool.pop().unwrap();
+                while let Some(pooled) = pool.pop() {
                     // 检查连接是否过期
                     if pooled.created_at.elapsed() < self.max_idle_time {
                         // 验证连接是否仍然有效（简单的健康检查）
@@ -1446,7 +1444,7 @@ impl ConnectionPool {
     }
 }
 
-/// ============= 优化 6: SOCKS5 认证支持 =============
+// ============= 优化 6: SOCKS5 认证支持 =============
 
 /// SOCKS5 认证配置
 #[derive(Clone, Debug)]
@@ -1519,7 +1517,7 @@ async fn handle_socks5_auth(stream: &mut TcpStream, auth: Option<&Socks5Auth>) -
     Ok(())
 }
 
-/// ============= 优化 7: 错误恢复机制 =============
+// ============= 优化 7: 错误恢复机制 =============
 
 /// 重试配置
 #[allow(dead_code)]

@@ -1,16 +1,17 @@
 use crate::config::ClientFullConfig;
 use crate::connection_pool::ConnectionPool;
 use anyhow::Result;
+use futures::io::{AsyncReadExt as FuturesAsyncReadExt, AsyncWriteExt as FuturesAsyncWriteExt};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{error, info, warn};
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt as FuturesAsyncWriteExt};
+
+use super::stats::ClientStatsTracker;
 
 use super::config::PROTOCOL_VERSION;
-use super::stats::ClientStatsTracker;
 
 #[derive(Serialize)]
 pub struct ClientConfigMessage<'a> {
@@ -43,16 +44,53 @@ where
     Ok(())
 }
 
+/// 拷贝数据并记录统计
+async fn copy_with_stats<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    tracker: &Option<ClientStatsTracker>,
+    is_upload: bool,
+) -> std::io::Result<u64>
+where
+    R: FuturesAsyncReadExt + Unpin,
+    W: FuturesAsyncWriteExt + Unpin,
+{
+    let mut total = 0u64;
+    let mut buf = vec![0u8; 8192];
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+
+        writer.write_all(&buf[..n]).await?;
+
+        // 记录统计
+        total += n as u64;
+        if let Some(ref t) = tracker {
+            if is_upload {
+                t.record_bytes_sent(n as u64);
+            } else {
+                t.record_bytes_received(n as u64);
+            }
+        }
+    }
+
+    writer.flush().await?;
+    Ok(total)
+}
+
 /// 处理yamux流
 pub async fn handle_stream(
-    mut stream: yamux::Stream,
+    stream: yamux::Stream,
     config: ClientFullConfig,
     proxy_pools: Arc<HashMap<u16, Arc<ConnectionPool>>>,
     stats_manager: super::stats::ClientStatsManager,
 ) -> Result<()> {
-    use futures::io::AsyncReadExt as FuturesAsyncReadExt;
+    let mut stream = stream;
 
-    // 读取 publish_port（与 visitor 保持一致）
+    // 从 stream 读取 publish_port
     let mut port_buf = [0u8; 2];
     stream.read_exact(&mut port_buf).await?;
     let publish_port = u16::from_be_bytes(port_buf);
@@ -95,7 +133,9 @@ pub async fn handle_stream(
             }
         }
     }
-    let _guard = ConnectionGuard { tracker };
+    let _guard = ConnectionGuard {
+        tracker: tracker.clone(),
+    };
 
     // 获取该代理对应的连接池（连接池键是 publish_port）
     let pool = proxy_pools
@@ -106,6 +146,7 @@ pub async fn handle_stream(
         .clone();
 
     let local_addr = format!("127.0.0.1:{}", proxy.local_port);
+
     let (mut stream_read, mut stream_write) = futures::io::AsyncReadExt::split(stream);
 
     // 尝试一次自动重连（本地转发失败时重建本地连接并重试）
@@ -119,28 +160,9 @@ pub async fn handle_stream(
         let mut local_read = local_read.compat();
         let mut local_write = local_write.compat_write();
 
-        // 使用支持统计记录的复制函数
-        let tracker_c2s = _guard.tracker.clone();
-        let local_to_stream = async {
-            copy_with_stats(
-                &mut local_read,
-                &mut stream_write,
-                tracker_c2s.as_ref(),
-                |tracker, n| tracker.record_bytes_sent(n),
-            )
-            .await
-        };
-
-        let tracker_s2c = _guard.tracker.clone();
-        let stream_to_local = async {
-            copy_with_stats(
-                &mut stream_read,
-                &mut local_write,
-                tracker_s2c.as_ref(),
-                |tracker, n| tracker.record_bytes_received(n),
-            )
-            .await
-        };
+        // 使用 copy_with_stats 记录流量统计
+        let local_to_stream = copy_with_stats(&mut local_read, &mut stream_write, &tracker, true);
+        let stream_to_local = copy_with_stats(&mut stream_read, &mut local_write, &tracker, false);
 
         let result = tokio::select! {
             result = local_to_stream => result,
@@ -176,38 +198,4 @@ pub async fn handle_stream(
             }
         }
     }
-}
-
-/// 带统计功能的数据复制函数
-/// 在复制数据的同时记录统计信息（使用 futures traits）
-async fn copy_with_stats<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    stats_tracker: Option<&ClientStatsTracker>,
-    record_fn: impl Fn(&ClientStatsTracker, u64),
-) -> std::io::Result<u64>
-where
-    R: AsyncRead + Unpin,
-    W: FuturesAsyncWriteExt + Unpin,
-{
-    const COPY_BUFFER_SIZE: usize = 65536;
-    let mut buf = vec![0u8; COPY_BUFFER_SIZE];
-    let mut total_copied = 0u64;
-
-    loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-
-        writer.write_all(&buf[..n]).await?;
-        total_copied += n as u64;
-
-        // 实时更新统计信息
-        if let Some(tracker) = stats_tracker {
-            record_fn(tracker, n as u64);
-        }
-    }
-
-    Ok(total_copied)
 }
