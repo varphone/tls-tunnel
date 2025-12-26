@@ -127,10 +127,10 @@ local_port = 22             # 转发到客户端本地 22 端口
 # 使用：ssh -p 2222 user@server-ip -> 客户端本地 ssh localhost:22
 
 # 示例 3: 数据库代理
-[[proxies]]
-name = "database"           # 数据库服务
-publish_port = 5432         # 服务端监听 5432 端口
-local_port = 5432           # 转发到客户端本地 5432 端口
+# [[proxies]]
+# name = "database"           # 数据库服务
+# publish_port = 5432         # 服务端监听 5432 端口
+# local_port = 5432           # 转发到客户端本地 5432 端口
 # 使用：psql -h server-ip -p 5432 -> 客户端本地数据库
 
 # 示例 4: HTTPS 服务代理

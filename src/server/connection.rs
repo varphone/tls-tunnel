@@ -12,10 +12,31 @@ pub async fn start_proxy_listener(
     stream_tx: mpsc::Sender<(mpsc::Sender<yamux::Stream>, u16, String)>,
     tracker: ProxyStatsTracker,
 ) -> Result<()> {
-    let listener =
-        tokio::net::TcpListener::bind(format!("{}:{}", proxy.publish_addr, proxy.publish_port))
-            .await
-            .context("Failed to bind proxy listener")?;
+    let addr = format!("{}:{}", proxy.publish_addr, proxy.publish_port);
+    
+    // 尝试绑定，如果失败则提供更详细的错误信息
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            let error_msg = match e.kind() {
+                std::io::ErrorKind::AddrInUse => {
+                    format!(
+                        "Port {} is already in use by another process. \
+                         Please check with 'netstat -ano | findstr :{}' or free the port and retry.",
+                        proxy.publish_port, proxy.publish_port
+                    )
+                }
+                std::io::ErrorKind::PermissionDenied => {
+                    format!(
+                        "Permission denied to bind to {}:{} - you may need administrator privileges for ports < 1024",
+                        proxy.publish_addr, proxy.publish_port
+                    )
+                }
+                _ => format!("Failed to bind proxy listener on {}: {}", addr, e),
+            };
+            return Err(anyhow::anyhow!(error_msg));
+        }
+    };
 
     info!(
         "Proxy '{}' listening on {}:{}",
