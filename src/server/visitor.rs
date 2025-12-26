@@ -207,7 +207,7 @@ pub async fn handle_visitor_stream(
         .context("Failed to request yamux stream from target client")?;
 
     // 等待目标客户端返回 yamux stream
-    let client_stream = response_rx
+    let mut client_stream = response_rx
         .recv()
         .await
         .ok_or_else(|| anyhow::anyhow!("Failed to receive yamux stream from target client"))?;
@@ -216,6 +216,13 @@ pub async fn handle_visitor_stream(
         "Got yamux stream to target client local port {}, starting bidirectional data transfer",
         local_port
     );
+
+    // 向客户端B的 stream 写入 publish_port（客户端需要通过此端口找到对应的 proxy 配置）
+    use futures::io::AsyncWriteExt as FuturesAsyncWriteExt;
+    client_stream.write_all(&publish_port.to_be_bytes()).await?;
+    client_stream.flush().await?;
+
+    info!("Sent publish_port {} to target client", publish_port);
 
     let client_stream_tokio = client_stream.compat();
 

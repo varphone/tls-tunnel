@@ -531,11 +531,15 @@ async fn test_http2_transport() {
     client_handle.abort();
 }
 
-// TODO: Visitor 模式需要更复杂的设置，包括服务器注册表和两个客户端间的通信
-// 暂时禁用该测试，等待进一步调试
+// Visitor 模式测试：客户端C通过服务器中转访问客户端B的服务
 #[tokio::test]
-#[ignore]
 async fn test_visitor_mode() {
+    // 初始化日志
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
     use tls_tunnel::config::{ProxyType, VisitorConfig};
 
     let server_port = common::get_available_port();
