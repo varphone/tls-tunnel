@@ -448,8 +448,7 @@ async fn handle_forwarder_connection(
                     warn!("Forwarder '{}': Client to remote copy error: {}", forwarder_msg_1, e);
                 }
                 
-                // 关闭远程写端
-                let _ = remote_write.shutdown().await;
+                // 注意：不调用 shutdown()，让连接保持可复用状态
                 result
             };
 
@@ -467,8 +466,7 @@ async fn handle_forwarder_connection(
                     warn!("Forwarder '{}': Remote to client copy error: {}", forwarder_msg_2, e);
                 }
                 
-                // 关闭本地写端
-                let _ = local_write.shutdown().await;
+                // 注意：不调用 shutdown()，让连接保持可复用状态
                 result
             };
 
@@ -1088,7 +1086,7 @@ async fn handle_direct_connection(
             if let Err(e) = &result {
                 warn!("Forwarder '{}' direct: Client to remote error: {}", name_msg_c2r, e);
             }
-            let _ = remote_write.shutdown().await;
+            // 注意：不调用 shutdown()，让连接保持可复用状态
             result
         };
 
@@ -1105,7 +1103,7 @@ async fn handle_direct_connection(
             if let Err(e) = &result {
                 warn!("Forwarder '{}' direct: Remote to client error: {}", name_msg_r2c, e);
             }
-            let _ = local_write.shutdown().await;
+            // 注意：不调用 shutdown()，让连接保持可复用状态
             result
         };
 
