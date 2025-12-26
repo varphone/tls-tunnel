@@ -163,9 +163,23 @@ impl ClientStatsManager {
     }
 
     /// 添加统计跟踪器
+    #[allow(dead_code)]
     pub fn add_tracker(&self, tracker: ClientStatsTracker) {
         let mut trackers = self.trackers.write();
         trackers.push(tracker);
+    }
+
+    /// 添加或更新统计跟踪器（如果已存在相同名称的跟踪器则替换）
+    pub fn add_or_update_tracker(&self, tracker: ClientStatsTracker) {
+        let mut trackers = self.trackers.write();
+        // 查找是否已存在相同名称的跟踪器
+        if let Some(pos) = trackers.iter().position(|t| t.name == tracker.name) {
+            // 替换现有的跟踪器
+            trackers[pos] = tracker;
+        } else {
+            // 添加新的跟踪器
+            trackers.push(tracker);
+        }
     }
 
     /// 获取所有统计信息

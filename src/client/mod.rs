@@ -287,7 +287,7 @@ async fn run_client_session(
             client_config.server_addr.clone(),
             proxy.publish_port,
         );
-        stats_manager.add_tracker(tracker);
+        stats_manager.add_or_update_tracker(tracker);
     }
 
     // 创建连接池
@@ -379,7 +379,7 @@ async fn run_client_session(
                 client_config.server_addr.clone(),
                 0, // forwarder 没有固定的 target_port
             );
-            stats_manager.add_tracker(tracker);
+            stats_manager.add_or_update_tracker(tracker);
         }
 
         // 为每个 forwarder 创建对应的 GeoIP 路由器
