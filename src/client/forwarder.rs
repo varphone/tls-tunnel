@@ -401,7 +401,13 @@ async fn handle_forwarder_connection(
 
         // 直接连接目标并转发请求（使用连接池）
         let mut remote_stream = match connection_pool.get_or_create(&target).await {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                info!(
+                    "Forwarder '{}': Got connection from pool to {}",
+                    forwarder.name, target
+                );
+                ReusableConnection::new(stream, target.clone(), connection_pool.clone())
+            }
             Err(e) => {
                 failed_target_manager.record_failure(&target).await;
                 local_stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nConnection failed").await.ok();
@@ -414,37 +420,68 @@ async fn handle_forwarder_connection(
         };
 
         // 发送修改后的请求
-        remote_stream.write_all(&request_data).await?;
+        if let Some(stream) = remote_stream.get_mut() {
+            stream.write_all(&request_data).await?;
+        }
         
         // 双向数据转发
         let (mut local_read, mut local_write) = local_stream.split();
-        let (mut remote_read, mut remote_write) = remote_stream.split();
+        
+        // 为了支持可复用连接，我们需要手动处理转发
+        // 而不是使用 split()（split 会消耗所有权）
+        // 因此我们采用循环转发的方式
+        
+        if let Some(stream) = remote_stream.get_mut() {
+            let (mut remote_read, mut remote_write) = stream.split();
 
-        let stats_c2r = stats_tracker.clone();
-        let c2r = async {
-            copy_with_stats(
-                &mut local_read,
-                &mut remote_write,
-                stats_c2r.as_ref(),
-                |t, n| t.record_bytes_sent(n),
-            ).await
-        };
+            let stats_c2r = stats_tracker.clone();
+            let forwarder_msg_1 = forwarder.name.clone();
+            let c2r = async {
+                let result = copy_with_stats(
+                    &mut local_read,
+                    &mut remote_write,
+                    stats_c2r.as_ref(),
+                    |t, n| t.record_bytes_sent(n),
+                ).await;
+                
+                if let Err(e) = &result {
+                    warn!("Forwarder '{}': Client to remote copy error: {}", forwarder_msg_1, e);
+                }
+                
+                // 关闭远程写端
+                let _ = remote_write.shutdown().await;
+                result
+            };
 
-        let stats_r2c = stats_tracker.clone();
-        let r2c = async {
-            copy_with_stats(
-                &mut remote_read,
-                &mut local_write,
-                stats_r2c.as_ref(),
-                |t, n| t.record_bytes_received(n),
-            ).await
-        };
+            let stats_r2c = stats_tracker.clone();
+            let forwarder_msg_2 = forwarder.name.clone();
+            let r2c = async {
+                let result = copy_with_stats(
+                    &mut remote_read,
+                    &mut local_write,
+                    stats_r2c.as_ref(),
+                    |t, n| t.record_bytes_received(n),
+                ).await;
+                
+                if let Err(e) = &result {
+                    warn!("Forwarder '{}': Remote to client copy error: {}", forwarder_msg_2, e);
+                }
+                
+                // 关闭本地写端
+                let _ = local_write.shutdown().await;
+                result
+            };
 
-        let _ = tokio::join!(c2r, r2c);
+            let _ = tokio::join!(c2r, r2c);
+        }
 
         if let Some(ref tracker) = stats_tracker {
             tracker.connection_ended();
         }
+        
+        // ReusableConnection 会在 drop 时自动返还连接到池
+        drop(remote_stream);
+        
         return Ok(());
     }
 
@@ -1010,10 +1047,10 @@ async fn handle_direct_connection(
     let mut remote_stream = match connection_pool.get_or_create(target).await {
         Ok(stream) => {
             info!(
-                "Forwarder '{}': Connected directly to {} (from pool or new)",
+                "Forwarder '{}': Got connection from pool to {} (or created new)",
                 forwarder_name, target
             );
-            stream
+            ReusableConnection::new(stream, target.to_string(), connection_pool.clone())
         }
         Err(e) => {
             error!(
@@ -1032,50 +1069,65 @@ async fn handle_direct_connection(
         }
     };
 
-    // 双向转发数据
+    // 双向转发数据（使用可复用连接包装器）
     let (mut local_read, mut local_write) = local_stream.split();
-    let (mut remote_read, mut remote_write) = remote_stream.split();
 
-    let stats_tracker_c2r = stats_tracker.clone();
-    let client_to_remote = async move {
-        let bytes = copy_with_stats(
-            &mut local_read,
-            &mut remote_write,
-            stats_tracker_c2r.as_ref(),
-            |tracker, n| tracker.record_bytes_sent(n),
-        )
-        .await?;
-        remote_write.shutdown().await?;
-        Ok::<_, std::io::Error>(bytes)
-    };
+    if let Some(stream) = remote_stream.get_mut() {
+        let (mut remote_read, mut remote_write) = stream.split();
 
-    let stats_tracker_r2c = stats_tracker.clone();
-    let remote_to_client = async move {
-        let bytes = copy_with_stats(
-            &mut remote_read,
-            &mut local_write,
-            stats_tracker_r2c.as_ref(),
-            |tracker, n| tracker.record_bytes_received(n),
-        )
-        .await?;
-        local_write.shutdown().await?;
-        Ok::<_, std::io::Error>(bytes)
-    };
+        let stats_tracker_c2r = stats_tracker.clone();
+        let name_msg_c2r = forwarder_name.to_string();
+        let client_to_remote = async move {
+            let result = copy_with_stats(
+                &mut local_read,
+                &mut remote_write,
+                stats_tracker_c2r.as_ref(),
+                |tracker, n| tracker.record_bytes_sent(n),
+            )
+            .await;
+            if let Err(e) = &result {
+                warn!("Forwarder '{}' direct: Client to remote error: {}", name_msg_c2r, e);
+            }
+            let _ = remote_write.shutdown().await;
+            result
+        };
 
-    // 使用 tokio::join! 确保两个方向的流量都被记录
-    let (result_c2r, result_r2c) = tokio::join!(client_to_remote, remote_to_client);
-    
-    if let Err(e) = result_c2r {
-        warn!("Forwarder '{}' direct: Client to remote error: {}", forwarder_name, e);
-    }
-    if let Err(e) = result_r2c {
-        warn!("Forwarder '{}' direct: Remote to client error: {}", forwarder_name, e);
+        let stats_tracker_r2c = stats_tracker.clone();
+        let name_msg_r2c = forwarder_name.to_string();
+        let remote_to_client = async move {
+            let result = copy_with_stats(
+                &mut remote_read,
+                &mut local_write,
+                stats_tracker_r2c.as_ref(),
+                |tracker, n| tracker.record_bytes_received(n),
+            )
+            .await;
+            if let Err(e) = &result {
+                warn!("Forwarder '{}' direct: Remote to client error: {}", name_msg_r2c, e);
+            }
+            let _ = local_write.shutdown().await;
+            result
+        };
+
+        // 使用 tokio::join! 确保两个方向的流量都被记录
+        let (result_c2r, result_r2c) = tokio::join!(client_to_remote, remote_to_client);
+        
+        if result_c2r.is_err() || result_r2c.is_err() {
+            warn!(
+                "Forwarder '{}': Data transfer completed with some errors",
+                forwarder_name
+            );
+        }
     }
 
     info!(
-        "Forwarder '{}': Direct connection to {} closed",
+        "Forwarder '{}': Direct connection to {} completed, returning to pool",
         forwarder_name, target
     );
+    
+    // ReusableConnection 会在 drop 时自动将连接返还到池
+    drop(remote_stream);
+    
     Ok(())
 }
 
@@ -1200,6 +1252,52 @@ impl ProxyHandler for ForwarderHandler {
         format!("{}:{}", self.config.bind_addr, self.config.bind_port)
     }
 }
+/// 可复用的连接包装器（RAII 模式）
+/// 在 drop 时自动将连接返还到池，或丢弃已关闭的连接
+struct ReusableConnection {
+    stream: Option<TcpStream>,
+    target: String,
+    pool: Arc<ConnectionPool>,
+}
+
+impl ReusableConnection {
+    fn new(stream: TcpStream, target: String, pool: Arc<ConnectionPool>) -> Self {
+        Self {
+            stream: Some(stream),
+            target,
+            pool,
+        }
+    }
+
+    /// 获取可变引用用于读写
+    fn get_mut(&mut self) -> Option<&mut TcpStream> {
+        self.stream.as_mut()
+    }
+
+    /// 获取不可变引用用于读
+    fn get(&self) -> Option<&TcpStream> {
+        self.stream.as_ref()
+    }
+
+    /// 获取所有权（消费连接）
+    fn into_inner(mut self) -> Option<TcpStream> {
+        self.stream.take()
+    }
+}
+
+impl Drop for ReusableConnection {
+    fn drop(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            // 异步任务中将连接返还到池
+            let target = self.target.clone();
+            let pool = self.pool.clone();
+            tokio::spawn(async move {
+                pool.return_connection(target, stream).await;
+            });
+        }
+    }
+}
+
 /// ============= 优化 5: 连接池缓存 =============
 
 /// 连接池项
