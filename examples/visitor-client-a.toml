@@ -5,20 +5,17 @@
 
 [client]
 # 服务器地址和端口
-server_addr = "your-server.com"
-server_port = 8443
+server_addr = "localhost"
+server_port = 3080
 
 # 用于 TLS 验证的服务器名称
-server_name = "your-server.com"
+# server_name = "localhost"
 
 # 认证密钥（与服务器一致）
-auth_key = "your-secret-key"
+auth_key = "test-secret-key-12345"
 
 # 传输协议: tls, http2, wss
 transport = "tls"
-
-# 客户端名称（可选，用于日志）
-name = "proxy-client"
 
 # ============================================
 # Proxy 配置（仅 Visitor 模式）
@@ -29,11 +26,11 @@ name = "proxy-client"
 
 # 示例 1: MySQL 数据库代理
 # 其他客户端的 visitor 通过 name = "mysql-proxy" + publish_port = 3306 匹配访问
-[[proxies]]
-name = "mysql-proxy"
-type = "tcp"
-local_port = 3306  # 本客户端本地的 MySQL 端口
-publish_port = 3306  # 用于 visitor 匹配的标识符（此处使用标准 MySQL 端口）
+# [[proxies]]
+# name = "mysql-proxy"
+# type = "tcp"
+# local_port = 3306  # 本客户端本地的 MySQL 端口
+# publish_port = 3306  # 用于 visitor 匹配的标识符（此处使用标准 MySQL 端口）
 
 # 关键：未配置 publish_addr
 # - 服务器不会在 3306 端口监听
@@ -42,50 +39,56 @@ publish_port = 3306  # 用于 visitor 匹配的标识符（此处使用标准 My
 
 
 # 示例 2: Redis 代理
-[[proxies]]
-name = "redis-proxy"
-type = "tcp"
-local_port = 6379
-publish_port = 6379
+# [[proxies]]
+# name = "redis-proxy"
+# type = "tcp"
+# local_port = 6379
+# publish_port = 6379
 
 
 # 示例 3: 内部 API 代理
-[[proxies]]
-name = "internal-api-proxy"
-type = "tcp"
-local_port = 3000
-publish_port = 3000
+# [[proxies]]
+# name = "internal-api-proxy"
+# type = "tcp"
+# local_port = 3000
+# publish_port = 3000
 
 
 # 示例 4: PostgreSQL 代理
-[[proxies]]
-name = "postgres-proxy"
-type = "tcp"
-local_port = 5432
-publish_port = 5432
+# [[proxies]]
+# name = "postgres-proxy"
+# type = "tcp"
+# local_port = 5432
+# publish_port = 5432
 
+# 示例 5: SSH 服务代理
+[[proxies]]
+name = "ssh-proxy"                # SSH 服务
+publish_port = 2222         # 服务端监听 2222 端口
+local_port = 22             # 转发到客户端本地 22 端口
+# 使用：ssh -p 2222 user@server-ip -> 客户端本地 ssh localhost:22
 
 # ============================================
 # 混合模式：同时支持外部访问和 Visitor
 # ============================================
 
 # 混合模式 proxy：既对外开放，也支持 visitor 访问
-[[proxies]]
-name = "web-service"
-type = "tcp"
-local_port = 8000
-publish_addr = "0.0.0.0"  # 配置后在服务器监听
-publish_port = 8080  # 服务器监听端口，也用于 visitor 匹配
+# [[proxies]]
+# name = "web-service"
+# type = "tcp"
+# local_port = 8000
+# publish_addr = "0.0.0.0"  # 配置后在服务器监听
+# publish_port = 8080  # 服务器监听端口，也用于 visitor 匹配
 # 访问方式：
 # 1. 外部直接访问：server_ip:8080 → 本客户端:8000
 # 2. 其他客户端 visitor：name="web-service" + publish_port=8080
 
 # 纯 Visitor 模式 proxy：仅供 visitor 访问
-[[proxies]]
-name = "admin-db"
-type = "tcp"
-local_port = 5433
-publish_port = 5433  # 仅用于 visitor 匹配
+# [[proxies]]
+# name = "admin-db"
+# type = "tcp"
+# local_port = 5433
+# publish_port = 5433  # 仅用于 visitor 匹配
 # 未配置 publish_addr，服务器不监听 5433 端口
 # 只能通过 visitor (name="admin-db", publish_port=5433) 访问
 
