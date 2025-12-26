@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, RwLock};
+use tokio::sync::{RwLock, Semaphore};
 use tokio::time::{sleep, Duration};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{debug, error, info, warn};
@@ -147,9 +147,7 @@ impl FailedTargetManager {
 
         targets
             .iter()
-            .filter(|(_, failed)| {
-                now < failed.blacklist_time + FAILED_TARGET_TIMEOUT.as_secs()
-            })
+            .filter(|(_, failed)| now < failed.blacklist_time + FAILED_TARGET_TIMEOUT.as_secs())
             .count()
     }
 }
@@ -181,7 +179,7 @@ where
     loop {
         // 使用 timeout 防止连接永久挂起（连接空闲超时保护）
         let result = timeout(CONNECTION_IDLE_TIMEOUT, reader.read(&mut buf)).await;
-        
+
         let n = match result {
             Ok(Ok(n)) => n,
             Ok(Err(e)) => return Err(e),
@@ -242,7 +240,7 @@ pub async fn run_forwarder_listener(
 
     // 创建连接池缓存
     let connection_pool = Arc::new(ConnectionPool::new(
-        100, // 最多缓存 100 个目标的连接
+        100,                      // 最多缓存 100 个目标的连接
         Duration::from_secs(300), // 连接空闲 5 分钟后过期
     ));
     info!(
@@ -357,7 +355,7 @@ async fn handle_forwarder_connection(
         ProxyType::HttpProxy => {
             // 解析 HTTP 请求（支持 CONNECT 和直接转发）
             let req = parse_http_request(&mut local_stream).await?;
-            
+
             match req.method.as_str() {
                 "CONNECT" => {
                     // CONNECT 隧道模式
@@ -366,7 +364,8 @@ async fn handle_forwarder_connection(
                 }
                 _ => {
                     // HTTP 直接转发（GET, POST 等）
-                    let (modified_request, target) = handle_http_direct(&mut local_stream, &req).await?;
+                    let (modified_request, target) =
+                        handle_http_direct(&mut local_stream, &req).await?;
                     (target, Some(modified_request))
                 }
             }
@@ -392,7 +391,7 @@ async fn handle_forwarder_connection(
             );
             let error_response = b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nService temporarily unavailable";
             local_stream.write_all(error_response).await.ok();
-            
+
             if let Some(ref tracker) = stats_tracker {
                 tracker.connection_ended();
             }
@@ -411,7 +410,7 @@ async fn handle_forwarder_connection(
             Err(e) => {
                 failed_target_manager.record_failure(&target).await;
                 local_stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nConnection failed").await.ok();
-                
+
                 if let Some(ref tracker) = stats_tracker {
                     tracker.connection_ended();
                 }
@@ -423,14 +422,14 @@ async fn handle_forwarder_connection(
         if let Some(stream) = remote_stream.get_mut() {
             stream.write_all(&request_data).await?;
         }
-        
+
         // 双向数据转发
         let (mut local_read, mut local_write) = local_stream.split();
-        
+
         // 为了支持可复用连接，我们需要手动处理转发
         // 而不是使用 split()（split 会消耗所有权）
         // 因此我们采用循环转发的方式
-        
+
         if let Some(stream) = remote_stream.get_mut() {
             let (mut remote_read, mut remote_write) = stream.split();
 
@@ -442,12 +441,16 @@ async fn handle_forwarder_connection(
                     &mut remote_write,
                     stats_c2r.as_ref(),
                     |t, n| t.record_bytes_sent(n),
-                ).await;
-                
+                )
+                .await;
+
                 if let Err(e) = &result {
-                    warn!("Forwarder '{}': Client to remote copy error: {}", forwarder_msg_1, e);
+                    warn!(
+                        "Forwarder '{}': Client to remote copy error: {}",
+                        forwarder_msg_1, e
+                    );
                 }
-                
+
                 // 注意：不调用 shutdown()，让连接保持可复用状态
                 result
             };
@@ -460,26 +463,39 @@ async fn handle_forwarder_connection(
                     &mut local_write,
                     stats_r2c.as_ref(),
                     |t, n| t.record_bytes_received(n),
-                ).await;
-                
+                )
+                .await;
+
                 if let Err(e) = &result {
-                    warn!("Forwarder '{}': Remote to client copy error: {}", forwarder_msg_2, e);
+                    warn!(
+                        "Forwarder '{}': Remote to client copy error: {}",
+                        forwarder_msg_2, e
+                    );
                 }
-                
+
                 // 注意：不调用 shutdown()，让连接保持可复用状态
                 result
             };
 
-            let _ = tokio::join!(c2r, r2c);
+            let (c2r_result, r2c_result) = tokio::join!(c2r, r2c);
+
+            // 如果发生错误，标记连接以便不返还到池
+            if c2r_result.is_err() || r2c_result.is_err() {
+                warn!(
+                    "Forwarder '{}': Data transfer completed with some errors",
+                    forwarder.name
+                );
+                remote_stream.mark_error();
+            }
         }
 
         if let Some(ref tracker) = stats_tracker {
             tracker.connection_ended();
         }
-        
+
         // ReusableConnection 会在 drop 时自动返还连接到池
         drop(remote_stream);
-        
+
         return Ok(());
     }
 
@@ -498,7 +514,7 @@ async fn handle_forwarder_connection(
              Target is temporarily unavailable (blacklisted)"
         );
         local_stream.write_all(error_response.as_bytes()).await.ok();
-        
+
         // 记录连接结束
         if let Some(ref tracker) = stats_tracker {
             tracker.connection_ended();
@@ -660,21 +676,27 @@ async fn handle_forwarder_connection(
 
     // 使用 tokio::join! 确保两个方向的流量都被记录
     let (result_c2s, result_s2c) = tokio::join!(client_to_server, server_to_client);
-    
+
     if let Err(e) = result_c2s {
-        warn!("Forwarder '{}': Client to server copy error: {}", forwarder.name, e);
+        warn!(
+            "Forwarder '{}': Client to server copy error: {}",
+            forwarder.name, e
+        );
     }
     if let Err(e) = result_s2c {
-        warn!("Forwarder '{}': Server to client copy error: {}", forwarder.name, e);
+        warn!(
+            "Forwarder '{}': Server to client copy error: {}",
+            forwarder.name, e
+        );
     }
 
     info!("Forwarder '{}': Connection closed", forwarder.name);
-    
+
     // 记录连接结束
     if let Some(ref tracker) = stats_tracker {
         tracker.connection_ended();
     }
-    
+
     Ok(())
 }
 
@@ -751,12 +773,7 @@ async fn parse_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         }
     })
     .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "HTTP parsing timeout after {:?}",
-            PROTOCOL_PARSE_TIMEOUT
-        )
-    })??;
+    .map_err(|_| anyhow::anyhow!("HTTP parsing timeout after {:?}", PROTOCOL_PARSE_TIMEOUT))??;
 
     Ok(result)
 }
@@ -782,10 +799,14 @@ async fn handle_http_direct(
     // 解析目标
     let target = if req.target.starts_with("http://") || req.target.starts_with("https://") {
         // 绝对 URL
-        let url = url::Url::parse(&req.target)
-            .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
-        let host = url.host_str().ok_or_else(|| anyhow::anyhow!("No host in URL"))?;
-        let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+        let url =
+            url::Url::parse(&req.target).map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("No host in URL"))?;
+        let port = url
+            .port()
+            .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
         format!("{}:{}", host, port)
     } else if let Some(host_header) = req.headers.get("host") {
         // 使用 Host header
@@ -1021,6 +1042,37 @@ fn is_unsafe_direct_target(target: &str) -> bool {
     }
 }
 
+/// ============= Forwarder 处理器 =============
+
+/// Forwarder 代理处理器
+pub struct ForwarderHandler {
+    pub config: ForwarderConfig,
+    pub stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    pub router: Option<Arc<GeoIpRouter>>,
+    pub status: Arc<RwLock<crate::client::HandlerStatus>>,
+    pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    pub stats_tracker: Option<ClientStatsTracker>,
+}
+
+impl ForwarderHandler {
+    /// 创建新的 ForwarderHandler
+    pub fn new(
+        config: ForwarderConfig,
+        stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+        router: Option<Arc<GeoIpRouter>>,
+        stats_tracker: Option<ClientStatsTracker>,
+    ) -> Self {
+        Self {
+            config,
+            stream_tx,
+            router,
+            status: Arc::new(RwLock::new(crate::client::HandlerStatus::Stopped)),
+            shutdown_tx: Arc::new(RwLock::new(None)),
+            stats_tracker,
+        }
+    }
+}
+
 /// 处理直连（不通过服务器）
 async fn handle_direct_connection(
     mut local_stream: TcpStream,
@@ -1055,10 +1107,10 @@ async fn handle_direct_connection(
                 "Forwarder '{}': Failed to connect directly to '{}': {}",
                 forwarder_name, target, e
             );
-            
+
             // 记录连接失败
             failed_target_manager.record_failure(target).await;
-            
+
             return Err(anyhow::anyhow!(
                 "Failed to connect directly to {}: {}",
                 target,
@@ -1084,7 +1136,10 @@ async fn handle_direct_connection(
             )
             .await;
             if let Err(e) = &result {
-                warn!("Forwarder '{}' direct: Client to remote error: {}", name_msg_c2r, e);
+                warn!(
+                    "Forwarder '{}' direct: Client to remote error: {}",
+                    name_msg_c2r, e
+                );
             }
             // 注意：不调用 shutdown()，让连接保持可复用状态
             result
@@ -1101,7 +1156,10 @@ async fn handle_direct_connection(
             )
             .await;
             if let Err(e) = &result {
-                warn!("Forwarder '{}' direct: Remote to client error: {}", name_msg_r2c, e);
+                warn!(
+                    "Forwarder '{}' direct: Remote to client error: {}",
+                    name_msg_r2c, e
+                );
             }
             // 注意：不调用 shutdown()，让连接保持可复用状态
             result
@@ -1109,12 +1167,14 @@ async fn handle_direct_connection(
 
         // 使用 tokio::join! 确保两个方向的流量都被记录
         let (result_c2r, result_r2c) = tokio::join!(client_to_remote, remote_to_client);
-        
+
         if result_c2r.is_err() || result_r2c.is_err() {
             warn!(
                 "Forwarder '{}': Data transfer completed with some errors",
                 forwarder_name
             );
+            // 如果发生错误，标记连接以便不返还到池
+            remote_stream.mark_error();
         }
     }
 
@@ -1122,47 +1182,11 @@ async fn handle_direct_connection(
         "Forwarder '{}': Direct connection to {} completed, returning to pool",
         forwarder_name, target
     );
-    
-    // ReusableConnection 会在 drop 时自动将连接返还到池
+
+    // ReusableConnection 会在 drop 时自动将连接返还到池或丢弃坏连接
     drop(remote_stream);
-    
+
     Ok(())
-}
-
-/// Forwarder 处理器（实现 ProxyHandler trait）
-pub struct ForwarderHandler {
-    config: ForwarderConfig,
-    stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
-    router: Option<Arc<GeoIpRouter>>,
-    stats_tracker: Option<ClientStatsTracker>,
-    status: Arc<tokio::sync::RwLock<crate::client::HandlerStatus>>,
-    shutdown_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
-    #[allow(dead_code)]
-    connection_pool: Arc<ConnectionPool>,
-}
-
-impl ForwarderHandler {
-    pub fn new(
-        config: ForwarderConfig,
-        stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
-        router: Option<Arc<GeoIpRouter>>,
-        stats_tracker: Option<ClientStatsTracker>,
-    ) -> Self {
-        Self {
-            config,
-            stream_tx,
-            router,
-            stats_tracker,
-            status: Arc::new(tokio::sync::RwLock::new(
-                crate::client::HandlerStatus::Stopped,
-            )),
-            shutdown_tx: Arc::new(tokio::sync::RwLock::new(None)),
-            connection_pool: Arc::new(ConnectionPool::new(
-                100, // 最多缓存 100 个目标的连接
-                Duration::from_secs(300), // 连接空闲 5 分钟后过期
-            )),
-        }
-    }
 }
 
 #[async_trait]
@@ -1250,12 +1274,27 @@ impl ProxyHandler for ForwarderHandler {
         format!("{}:{}", self.config.bind_addr, self.config.bind_port)
     }
 }
+/// 检查连接是否还活着（简单的健康检查）
+/// 通过尝试设置 TCP_NODELAY 来验证连接是否仍然有效
+async fn is_connection_alive(stream: &TcpStream) -> bool {
+    // 尝试获取当前的 TCP_NODELAY 状态
+    // 如果连接已断开，这个操作会失败
+    match stream.nodelay() {
+        Ok(_) => true, // 连接仍然有效
+        Err(_) => {
+            warn!("Connection health check failed: connection is no longer alive");
+            false // 连接已断开
+        }
+    }
+}
+
 /// 可复用的连接包装器（RAII 模式）
 /// 在 drop 时自动将连接返还到池，或丢弃已关闭的连接
 struct ReusableConnection {
     stream: Option<TcpStream>,
     target: String,
     pool: Arc<ConnectionPool>,
+    had_error: bool, // 标记是否发生过错误
 }
 
 impl ReusableConnection {
@@ -1264,7 +1303,13 @@ impl ReusableConnection {
             stream: Some(stream),
             target,
             pool,
+            had_error: false,
         }
+    }
+
+    /// 标记连接发生过错误
+    fn mark_error(&mut self) {
+        self.had_error = true;
     }
 
     /// 获取可变引用用于读写
@@ -1273,11 +1318,13 @@ impl ReusableConnection {
     }
 
     /// 获取不可变引用用于读
+    #[allow(dead_code)]
     fn get(&self) -> Option<&TcpStream> {
         self.stream.as_ref()
     }
 
     /// 获取所有权（消费连接）
+    #[allow(dead_code)]
     fn into_inner(mut self) -> Option<TcpStream> {
         self.stream.take()
     }
@@ -1286,6 +1333,15 @@ impl ReusableConnection {
 impl Drop for ReusableConnection {
     fn drop(&mut self) {
         if let Some(stream) = self.stream.take() {
+            // 如果连接发生过错误，直接丢弃而不是返还到池
+            if self.had_error {
+                debug!(
+                    "Discarding connection to {} due to previous errors",
+                    self.target
+                );
+                return;
+            }
+
             // 异步任务中将连接返还到池
             let target = self.target.clone();
             let pool = self.pool.clone();
@@ -1323,10 +1379,7 @@ impl ConnectionPool {
     }
 
     /// 从池中获取或创建连接
-    pub async fn get_or_create(
-        &self,
-        target: &str,
-    ) -> Result<TcpStream> {
+    pub async fn get_or_create(&self, target: &str) -> Result<TcpStream> {
         // 尝试从池中获取可用连接
         {
             let mut pools = self.pools.write().await;
@@ -1335,17 +1388,22 @@ impl ConnectionPool {
                     let pooled = pool.pop().unwrap();
                     // 检查连接是否过期
                     if pooled.created_at.elapsed() < self.max_idle_time {
-                        return Ok(pooled.stream);
+                        // 验证连接是否仍然有效（简单的健康检查）
+                        if is_connection_alive(&pooled.stream).await {
+                            return Ok(pooled.stream);
+                        }
+                        // 连接已断开，继续尝试下一个或创建新连接
                     }
-                    // 连接已过期，丢弃
+                    // 连接已过期或已断开，丢弃
                 }
             }
         }
 
         // 创建新连接
-        let stream = TcpStream::connect(target).await
+        let stream = TcpStream::connect(target)
+            .await
             .context(format!("Failed to connect to {}", target))?;
-        
+
         stream.set_nodelay(true)?;
         Ok(stream)
     }
@@ -1354,7 +1412,7 @@ impl ConnectionPool {
     pub async fn return_connection(&self, target: String, stream: TcpStream) {
         let mut pools = self.pools.write().await;
         let pool = pools.entry(target).or_insert_with(Vec::new);
-        
+
         if pool.len() < self.max_pool_size {
             pool.push(PooledConnection {
                 stream,
@@ -1385,10 +1443,7 @@ pub struct Socks5Auth {
 
 /// SOCKS5 认证处理
 #[allow(dead_code)]
-async fn handle_socks5_auth(
-    stream: &mut TcpStream,
-    auth: Option<&Socks5Auth>,
-) -> Result<()> {
+async fn handle_socks5_auth(stream: &mut TcpStream, auth: Option<&Socks5Auth>) -> Result<()> {
     // 1. 服务器读取客户端支持的认证方法
     let mut buffer = [0u8; 2];
     stream.read_exact(&mut buffer).await?;
@@ -1471,10 +1526,7 @@ impl Default for RetryConfig {
 
 /// 带指数退避的重试执行
 #[allow(dead_code)]
-pub async fn retry_with_backoff<F, Fut, T>(
-    mut f: F,
-    config: &RetryConfig,
-) -> Result<T>
+pub async fn retry_with_backoff<F, Fut, T>(mut f: F, config: &RetryConfig) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: futures::Future<Output = Result<T>>,
@@ -1488,10 +1540,7 @@ where
             Err(e) => {
                 attempt += 1;
                 if attempt >= config.max_retries {
-                    return Err(e).context(format!(
-                        "Failed after {} retries",
-                        config.max_retries
-                    ));
+                    return Err(e).context(format!("Failed after {} retries", config.max_retries));
                 }
 
                 warn!(
@@ -1514,7 +1563,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_pool() {
-        let pool = ConnectionPool::new(5, Duration::from_secs(60));
+        let _pool = ConnectionPool::new(5, Duration::from_secs(60));
         // 测试池的基本功能
         // 注意：这里需要实际的连接才能完全测试
     }

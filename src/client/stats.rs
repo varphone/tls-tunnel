@@ -181,6 +181,7 @@ impl ClientStatsManager {
     }
 
     /// 重置所有统计信息
+    #[allow(dead_code)]
     pub fn reset_all(&self) {
         let trackers = self.trackers.read();
         for tracker in trackers.iter() {
