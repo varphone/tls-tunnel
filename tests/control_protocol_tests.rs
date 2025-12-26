@@ -2,8 +2,8 @@
 //
 // 本文件演示如何在实际场景中使用异常通知功能
 
-use tls_tunnel::control_protocol::*;
 use serde_json::json;
+use tls_tunnel::control_protocol::*;
 
 #[test]
 fn test_exception_notification_structure() {

@@ -6,8 +6,8 @@ mod stats;
 mod visitor;
 mod yamux;
 
-pub use registry::ProxyRegistry;
 pub use connection::ExceptionNotification;
+pub use registry::ProxyRegistry;
 
 use crate::config::ServerConfig;
 use crate::stats::StatsManager;
@@ -386,7 +386,7 @@ async fn handle_proxy_config_submission(
     // 如果所有代理都会被拒绝
     if !proxies.is_empty() && rejected_proxies.len() == proxies.len() {
         error!("All proxies rejected: {}", rejected_proxies.join(", "));
-        
+
         // 发送异常通知给客户端
         let _ = control_channel
             .send_exception_notification(
@@ -397,10 +397,10 @@ async fn handle_proxy_config_submission(
                 Some(serde_json::json!({
                     "rejected_proxies": &rejected_proxies,
                     "reason": "端口或名称冲突"
-                }))
+                })),
             )
             .await;
-        
+
         control_channel
             .send_config_rejected(control_stream, id, rejected_proxies)
             .await?;
@@ -481,7 +481,7 @@ async fn handle_proxy_config_submission(
             "Partially accepted: {} item(s) rejected",
             all_rejected.len()
         );
-        
+
         // 发送警告通知
         let _ = control_channel
             .send_exception_notification(
@@ -493,10 +493,10 @@ async fn handle_proxy_config_submission(
                     "rejected_items": &all_rejected,
                     "rejected_proxies": &rejected_proxies,
                     "rejected_visitors": &rejected_visitors
-                }))
+                })),
             )
             .await;
-        
+
         control_channel
             .send_config_partially_rejected(control_stream, id, all_rejected)
             .await?;

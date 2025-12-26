@@ -331,7 +331,10 @@ impl ServerControlChannel {
         stream.write_all(&request_json).await?;
         stream.flush().await?;
 
-        info!("Sent exception notification: level={}, message={}", level, message);
+        info!(
+            "Sent exception notification: level={}, message={}",
+            level, message
+        );
         Ok(())
     }
 

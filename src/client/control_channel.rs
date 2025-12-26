@@ -185,7 +185,10 @@ impl ClientControlChannel {
                         }
                     }
                 } else {
-                    warn!("Failed to parse exception notification: {:?}", request.params);
+                    warn!(
+                        "Failed to parse exception notification: {:?}",
+                        request.params
+                    );
                 }
             }
             _ => {

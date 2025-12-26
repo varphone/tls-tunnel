@@ -75,7 +75,7 @@ fn test_bind_failed_notification_data() {
 
     assert_eq!(request.level, "error");
     assert_eq!(request.code.unwrap(), "PROXY_BIND_FAILED");
-    
+
     let data = request.data.unwrap();
     assert_eq!(data["max_retries"], 10);
     assert_eq!(data["final_error"], "Address already in use");
