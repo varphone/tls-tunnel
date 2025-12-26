@@ -192,9 +192,7 @@ impl ServerControlChannel {
         id: serde_json::Value,
         rejected_proxies: Vec<String>,
     ) -> Result<()> {
-        let result = SubmitConfigResult {
-            rejected_proxies,
-        };
+        let result = SubmitConfigResult { rejected_proxies };
 
         let response = JsonRpcResponse {
             jsonrpc: "2.0".to_string(),

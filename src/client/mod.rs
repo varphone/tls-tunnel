@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use futures::future::poll_fn;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration, interval};
+use tokio::time::{interval, sleep, Duration};
 use tokio_rustls::TlsConnector;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{debug, error, info, warn};
@@ -289,12 +289,16 @@ enum ClientState {
 
 /// 客户端世界 - 统一管理所有共享资源
 struct ClientWorld {
-    yamux_conn: YamuxConnection<tokio_util::compat::Compat<std::pin::Pin<Box<dyn crate::transport::Transport>>>>,
+    yamux_conn: YamuxConnection<
+        tokio_util::compat::Compat<std::pin::Pin<Box<dyn crate::transport::Transport>>>,
+    >,
     event_rx: tokio::sync::mpsc::UnboundedReceiver<control_channel::ControlEvent>,
-    visitor_stream_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    visitor_stream_rx:
+        tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     config: Arc<ClientFullConfig>,
     stats_manager: stats::ClientStatsManager,
-    visitor_stream_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
+    visitor_stream_tx:
+        tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<yamux::Stream>>>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
     state: ClientState,
     heartbeat_interval: tokio::time::Interval,
@@ -304,7 +308,7 @@ struct ClientWorld {
 impl ClientWorld {
     /// 处理控制通道事件
     async fn handle_control_event(
-        &mut self, 
+        &mut self,
         event: control_channel::ControlEvent,
         control_channel: &mut control_channel::ClientControlChannel,
         control_stream: &mut yamux::Stream,
@@ -356,7 +360,8 @@ impl ClientWorld {
 
         // 创建连接池
         let pool_config = get_pool_config().await;
-        let pools: HashMap<u16, Arc<ConnectionPool>> = self.config
+        let pools: HashMap<u16, Arc<ConnectionPool>> = self
+            .config
             .proxies
             .iter()
             .map(|proxy| {
@@ -419,7 +424,10 @@ impl ClientWorld {
     async fn start_listeners(&mut self) -> Result<()> {
         // 启动 visitor 监听器
         if !self.config.visitors.is_empty() {
-            info!("Starting {} visitor listeners...", self.config.visitors.len());
+            info!(
+                "Starting {} visitor listeners...",
+                self.config.visitors.len()
+            );
 
             for visitor in &self.config.visitors {
                 let visitor_clone = visitor.clone();
@@ -428,7 +436,9 @@ impl ClientWorld {
                 let shutdown_rx = self.shutdown_tx.subscribe();
 
                 tokio::spawn(async move {
-                    if let Err(e) = run_visitor_listener(visitor_clone, stream_tx_clone, shutdown_rx).await {
+                    if let Err(e) =
+                        run_visitor_listener(visitor_clone, stream_tx_clone, shutdown_rx).await
+                    {
                         error!("Visitor '{}' listener error: {}", visitor_name, e);
                     }
                 });
@@ -437,7 +447,10 @@ impl ClientWorld {
 
         // 启动 forwarder 监听器
         if !self.config.forwarders.is_empty() {
-            info!("Starting {} forwarder listeners...", self.config.forwarders.len());
+            info!(
+                "Starting {} forwarder listeners...",
+                self.config.forwarders.len()
+            );
 
             for forwarder in &self.config.forwarders {
                 let tracker = stats::ClientStatsTracker::new(
@@ -465,7 +478,10 @@ impl ClientWorld {
                             Some(Arc::new(router))
                         }
                         Err(e) => {
-                            warn!("Forwarder '{}': Failed to initialize GeoIP router: {}", forwarder_name, e);
+                            warn!(
+                                "Forwarder '{}': Failed to initialize GeoIP router: {}",
+                                forwarder_name, e
+                            );
                             None
                         }
                     }
@@ -480,7 +496,9 @@ impl ClientWorld {
                         router,
                         stats_tracker,
                         shutdown_rx,
-                    ).await {
+                    )
+                    .await
+                    {
                         error!("Forwarder '{}' listener error: {}", forwarder_name, e);
                     }
                 });
@@ -611,4 +629,3 @@ async fn run_old_main_loop(
     warn!("run_old_main_loop is deprecated");
     Ok(())
 }
-

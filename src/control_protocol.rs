@@ -2,7 +2,6 @@
 ///
 /// 该模块实现了客户端与服务端之间的控制通道通信协议，
 /// 使用长度前缀（4字节大端）+ JSON-RPC 2.0 格式
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,13 +10,13 @@ use serde_json::Value;
 pub struct JsonRpcRequest {
     /// JSON-RPC 版本（固定为 "2.0"）
     pub jsonrpc: String,
-    
+
     /// 方法名
     pub method: String,
-    
+
     /// 参数
     pub params: Value,
-    
+
     /// 请求 ID（用于匹配响应，通知时为 None）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
@@ -33,7 +32,7 @@ impl JsonRpcRequest {
             id: Some(Value::Number(id.into())),
         }
     }
-    
+
     /// 是否为通知
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
@@ -45,15 +44,15 @@ impl JsonRpcRequest {
 pub struct JsonRpcResponse {
     /// JSON-RPC 版本（固定为 "2.0"）
     pub jsonrpc: String,
-    
+
     /// 结果（成功时）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
-    
+
     /// 错误（失败时）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
-    
+
     /// 请求 ID（对应请求的 ID）
     pub id: Value,
 }
@@ -68,7 +67,7 @@ impl JsonRpcResponse {
             id,
         }
     }
-    
+
     /// 创建错误响应
     pub fn error(id: Value, error: JsonRpcError) -> Self {
         Self {
@@ -85,10 +84,10 @@ impl JsonRpcResponse {
 pub struct JsonRpcError {
     /// 错误码
     pub code: i32,
-    
+
     /// 错误消息
     pub message: String,
-    
+
     /// 附加数据（可选）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
@@ -124,17 +123,17 @@ pub enum ControlMethod {
     // 客户端 -> 服务端
     /// 认证
     Authenticate,
-    
+
     /// 提交配置
     SubmitConfig,
-    
+
     /// 心跳
     Heartbeat,
-    
+
     // 服务端 -> 客户端
     /// 推送配置状态
     PushConfigStatus,
-    
+
     /// 推送统计信息
     PushStats,
 }
@@ -151,7 +150,7 @@ impl ControlMethod {
             _ => Err(anyhow::anyhow!("Unknown control method: {}", s)),
         }
     }
-    
+
     /// 转换为字符串
     pub fn as_str(&self) -> &'static str {
         match self {

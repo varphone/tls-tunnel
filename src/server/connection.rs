@@ -32,10 +32,7 @@ pub async fn start_proxy_listener_with_notify(
                 );
 
                 // 启动监听循环
-                return handle_listener_loop(
-                    listener, proxy, stream_tx, tracker,
-                )
-                .await;
+                return handle_listener_loop(listener, proxy, stream_tx, tracker).await;
             }
             Err(e) => {
                 retry_count += 1;
