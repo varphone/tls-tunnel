@@ -1,5 +1,74 @@
 # 变更日志
 
+## [1.5.0] - 2025-12-27
+
+### 新增
+- ✨ **全面的集成测试套件**
+  * 添加完整的集成测试用例，覆盖主要功能场景
+  * visitor 和 forwarder 模式的集成测试
+  * 代理绑定异常通知测试
+
+- 🧪 **Fuzzy 测试框架**
+  * 创建 8 个综合性 fuzzy 测试用例，验证服务器可靠性
+  * test_malformed_auth_message - 测试畸形消息处理
+  * test_oversized_messages - 测试超大消息限制
+  * test_rapid_connect_disconnect - 测试快速连接/断开
+  * test_concurrent_connections - 测试并发连接
+  * test_incomplete_handshake - 测试不完整握手
+  * test_random_data_injection - 测试随机数据注入
+  * test_idle_connections - 测试空闲连接
+  * test_mixed_valid_invalid_messages - 测试混合有效/无效消息
+  * 添加详细的 fuzzy 测试文档（docs/development/FUZZY_TESTING.md）
+
+- 📢 **异常通知功能**
+  * 实现异常通知和代理绑定失败通知功能
+  * 增强系统可观测性和问题诊断能力
+
+### 改进
+- 🔧 **架构重构**
+  * 重构客户端架构，使用统一事件循环和 ClientWorld 结构体
+  * 重构服务端架构，使用统一事件循环和 ServerWorld 结构体
+  * 重构 CLI 模块，创建 cli 子模块结构
+  * 重组文档结构，将开发文档移至 docs/development 目录
+
+- 🛠️ **错误消息优化**
+  * 改进 TLS 连接错误消息，提供更好的故障排查信息
+  * 增强证书验证失败的错误提示
+  * 添加详细的错误原因和解决建议
+
+- 🔒 **安全性改进**
+  * 改进 forwarder 直接连接的安全检查
+  * 支持路由规则覆盖 SSRF 保护（bypass_safety_check）
+  * 修正 test_forwarder_http_proxy 和 test_forwarder_socks5_proxy 测试用例
+
+- 🌐 **协议兼容性**
+  * 增强协议向前和向后兼容性
+  * 修复 visitor 配置验证问题
+  * 修复服务端未处理 inbound stream 导致 forwarder 功能失效
+
+### 修复
+- 🐛 **Bug 修复**
+  * 修复 visitor 模式测试 - 服务器向客户端B发送 publish_port
+  * 修复客户端和服务端 yamux 连接未持续 poll 的问题
+  * 修复所有 clippy 警告和错误
+  * 删除客户端和服务器中的无用代码
+
+### 文档
+- 📝 **文档更新**
+  * 更新示例配置文件
+  * 添加 fuzzy 测试文档
+  * 改进开发文档组织结构
+
+### 测试
+- ✅ **测试覆盖**
+  * 总计 96 个测试用例全部通过
+  * 68 个单元测试
+  * 10 个集成测试
+  * 8 个 fuzzy 测试
+  * 4 个控制协议测试
+  * 4 个代理绑定异常测试
+  * 2 个文档测试
+
 ## [1.4.1] - 2025-12-26
 
 ### 改进
