@@ -553,6 +553,7 @@ async fn handle_forwarder_connection(
             stats_tracker.clone(),
             failed_target_manager.clone(),
             connection_pool.clone(),
+            true, // 路由规则明确指定直连，跳过安全检查
         )
         .await;
         // 无论成功或失败，都记录连接结束
@@ -1090,9 +1091,11 @@ async fn handle_direct_connection(
     stats_tracker: Option<ClientStatsTracker>,
     failed_target_manager: FailedTargetManager,
     connection_pool: Arc<ConnectionPool>,
+    bypass_safety_check: bool,
 ) -> Result<()> {
     // 安全检查：禁止访问本地地址和内网地址（防止 SSRF 攻击）
-    if is_unsafe_direct_target(target) {
+    // 但如果是路由规则明确指定的，则允许（bypass_safety_check = true）
+    if !bypass_safety_check && is_unsafe_direct_target(target) {
         warn!(
             "Forwarder '{}': Blocked direct connection to local/private address: {}",
             forwarder_name, target

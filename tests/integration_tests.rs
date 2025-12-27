@@ -838,12 +838,10 @@ async fn test_forwarder_http_proxy() {
     client_handle.abort();
 }
 
-// TODO: SOCKS5 Forwarder 需要服务器启用 allow_forward 并正确设置代理链
-// 暂时禁用该测试，等待进一步调试
+// SOCKS5 Forwarder 测试
 #[tokio::test]
-#[ignore]
 async fn test_forwarder_socks5_proxy() {
-    use tls_tunnel::config::{ForwarderConfig, ProxyType};
+    use tls_tunnel::config::{ForwarderConfig, ProxyType, RoutingConfig};
 
     let server_port = common::get_available_port();
     let forwarder_port = common::get_available_port(); // SOCKS5 代理端口
@@ -885,6 +883,7 @@ async fn test_forwarder_socks5_proxy() {
     sleep(Duration::from_millis(300)).await;
 
     // 配置客户端 - forwarder 模式（SOCKS5 代理）
+    // 使用路由配置使 127.0.0.1 直连（避免被服务器安全检查拒绝）
     let client_config = ClientFullConfig {
         client: ClientConfig {
             server_addr: "127.0.0.1".to_string(),
@@ -904,7 +903,17 @@ async fn test_forwarder_socks5_proxy() {
             proxy_type: ProxyType::Socks5Proxy,
             bind_addr: "127.0.0.1".to_string(),
             bind_port: forwarder_port,
-            routing: None,
+            // 配置路由：127.0.0.1 直连
+            routing: Some(RoutingConfig {
+                geoip_db: None,
+                direct_countries: vec![],
+                proxy_countries: vec![],
+                direct_ips: vec!["127.0.0.0/8".to_string()], // 本地回环地址直连
+                proxy_ips: vec![],
+                direct_domains: vec![],
+                proxy_domains: vec![],
+                default_strategy: tls_tunnel::config::RoutingStrategy::Direct, // 默认直连
+            }),
         }],
     };
     let tls_config = tls_tunnel::tls::load_client_config_with_alpn(Some(&cert_path), true, None)
@@ -917,7 +926,7 @@ async fn test_forwarder_socks5_proxy() {
             .ok();
     });
 
-    sleep(Duration::from_millis(1000)).await;
+    sleep(Duration::from_millis(500)).await;
 
     // 测试 SOCKS5 连接
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", forwarder_port))
@@ -953,8 +962,16 @@ async fn test_forwarder_socks5_proxy() {
         .read_exact(&mut buf)
         .await
         .expect("Failed to read SOCKS5 CONNECT response");
+    
     assert_eq!(buf[0], 0x05, "SOCKS5 version should be 5");
-    assert_eq!(buf[1], 0x00, "SOCKS5 CONNECT should succeed");
+    assert_eq!(
+        buf[1], 0x00,
+        "SOCKS5 CONNECT should succeed, got reply: {}",
+        buf[1]
+    );
+
+    // 等待连接完全建立
+    sleep(Duration::from_millis(100)).await;
 
     // 通过 SOCKS5 代理发送数据到 echo 服务器
     let test_data = b"SOCKS5 forwarder test";
@@ -962,15 +979,21 @@ async fn test_forwarder_socks5_proxy() {
         .write_all(test_data)
         .await
         .expect("Failed to write test data");
+    stream.flush().await.expect("Failed to flush");
 
-    // 读取 echo 响应
+    // 读取 echo 响应（使用超时）
     let mut response = vec![0u8; test_data.len()];
-    stream
-        .read_exact(&mut response)
-        .await
-        .expect("Failed to read echo response");
-
-    assert_eq!(response, test_data, "Should receive echoed data");
+    match tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut response)).await {
+        Ok(Ok(_)) => {
+            assert_eq!(response, test_data, "Should receive echoed data");
+        }
+        Ok(Err(e)) => {
+            panic!("Failed to read echo response: {}", e);
+        }
+        Err(_) => {
+            panic!("Timeout reading echo response");
+        }
+    }
 
     server_handle.abort();
     client_handle.abort();
