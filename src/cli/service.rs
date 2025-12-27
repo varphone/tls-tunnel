@@ -14,6 +14,7 @@ pub fn register_systemd_service(
 
     #[cfg(target_os = "linux")]
     {
+        use anyhow::Context;
         use std::process::Command;
 
         let service_name = _name.unwrap_or_else(|| match _service_type {
@@ -115,6 +116,8 @@ pub fn unregister_systemd_service(_service_type: &str, _name: Option<&str>) -> R
 
     #[cfg(target_os = "linux")]
     {
+        use anyhow::Context;
+        use std::path::Path;
         use std::process::Command;
 
         let service_name = _name.unwrap_or_else(|| match _service_type {
