@@ -69,21 +69,36 @@ pub fn load_client_config_with_alpn(
 
     if let Some(ca_path) = ca_cert_path {
         // 加载自定义 CA 证书
-        let ca_file = File::open(ca_path)
-            .with_context(|| format!("Failed to open CA cert file: {:?}", ca_path))?;
+        let ca_file = File::open(ca_path).with_context(|| {
+            format!(
+                "Failed to open CA cert file: {:?}. Make sure the file exists and is readable.",
+                ca_path
+            )
+        })?;
         let mut ca_reader = BufReader::new(ca_file);
         let ca_certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut ca_reader)
             .collect::<Result<Vec<_>, _>>()
-            .context("Failed to parse CA certificates")?;
+            .context("Failed to parse CA certificates. Ensure the file is in valid PEM format.")?;
+
+        if ca_certs.is_empty() {
+            anyhow::bail!("No valid certificates found in CA cert file: {:?}", ca_path);
+        }
 
         for cert in ca_certs {
             root_store
                 .add(cert)
-                .context("Failed to add CA certificate")?;
+                .context("Failed to add CA certificate to trust store")?;
         }
     } else if !skip_verify {
         // 使用系统 CA 证书
         let native_certs = rustls_native_certs::load_native_certs();
+        if native_certs.certs.is_empty() {
+            anyhow::bail!(
+                "No system CA certificates found. Either:\\n  \
+                - Set skip_verify = true (for testing with self-signed certificates)\\n  \
+                - Provide ca_cert_path to specify a CA certificate file"
+            );
+        }
         for cert in native_certs.certs {
             root_store.add(cert).ok();
         }

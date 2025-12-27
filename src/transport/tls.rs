@@ -43,7 +43,7 @@ impl TransportClient for TlsTransportClient {
             .connector
             .connect(server_name, tcp_stream)
             .await
-            .context("TLS handshake failed")?;
+            .context("TLS handshake failed. This could be caused by:\n  - Certificate verification failure (try setting skip_verify = true for self-signed certificates)\n  - Invalid server certificate\n  - Certificate expired\n  - Server name mismatch\n  - Network issues")?;
 
         info!("TLS connection established to {}", addr);
         Ok(Box::pin(tls_stream))

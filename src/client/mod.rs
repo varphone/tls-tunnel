@@ -181,7 +181,7 @@ pub async fn run_client(config: ClientFullConfig, tls_connector: TlsConnector) -
                 info!("Client session ended normally");
             }
             Err(e) => {
-                error!("Client session error: {}", e);
+                error!("Client session error: {:#}", e);
             }
         }
 
@@ -216,7 +216,12 @@ async fn run_client_session(
     let transport_stream = transport_client
         .connect()
         .await
-        .context("Failed to connect to server via transport")?;
+        .with_context(|| {
+            format!(
+                "Failed to connect to server via {} transport.\n  \nTroubleshooting tips:\n  - Check if server is running and accessible\n  - Verify server address and port are correct\n  - For TLS: ensure certificate is valid or set skip_verify = true\n  - Check network connectivity and firewall rules",
+                transport_client.transport_type()
+            )
+        })?;
 
     info!(
         "Connected to server via {} transport",
