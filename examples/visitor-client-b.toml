@@ -74,6 +74,7 @@ publish_port = 3306
 # 示例 4: 访问另一个客户端的内部 SSH 服务
 [[visitors]]
 name = "ssh-proxy"
+type = "ssh"
 bind_addr = "127.0.0.1"
 bind_port = 2223
 publish_port = 2222

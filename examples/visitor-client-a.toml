@@ -17,6 +17,9 @@ auth_key = "test-secret-key-12345"
 # 传输协议: tls, http2, wss
 transport = "tls"
 
+# 跳过证书验证（测试自签名证书时使用）
+skip_verify = true
+
 # ============================================
 # Proxy 配置（仅 Visitor 模式）
 # ============================================
@@ -64,6 +67,7 @@ transport = "tls"
 # 示例 5: SSH 服务代理
 [[proxies]]
 name = "ssh-proxy"                # SSH 服务
+type = "ssh"                      # 代理类型
 publish_port = 2222         # 服务端监听 2222 端口
 local_port = 22             # 转发到客户端本地 22 端口
 # 使用：ssh -p 2222 user@server-ip -> 客户端本地 ssh localhost:22
