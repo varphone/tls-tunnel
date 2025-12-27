@@ -962,7 +962,7 @@ async fn test_forwarder_socks5_proxy() {
         .read_exact(&mut buf)
         .await
         .expect("Failed to read SOCKS5 CONNECT response");
-    
+
     assert_eq!(buf[0], 0x05, "SOCKS5 version should be 5");
     assert_eq!(
         buf[1], 0x00,
